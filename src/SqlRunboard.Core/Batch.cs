@@ -28,6 +28,9 @@ public sealed record BatchSettings
     public bool ConfirmBeforeRun { get; init; }
     public int? TimeoutSeconds { get; init; }
     public BatchTarget Target { get; init; } = new();
+
+    /// <summary>The ranges of docs/SPEC.md "Batch". JSON input can also give null for the non-null properties.</summary>
+    public bool IsValid => this is { ParallelLimit: >= 1 and <= 64, TimeoutSeconds: null or >= 1, Filters: not null, Target: not null };
 }
 
 /// <summary>One file of the batch. Path is relative to the folder, with /. Include false: a cleared check box.</summary>

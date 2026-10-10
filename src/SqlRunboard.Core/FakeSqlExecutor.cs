@@ -10,6 +10,7 @@ public sealed record FakeScript
     public long? Rows { get; init; }
     public string? Error { get; init; }
     public IReadOnlyList<SqlMessage> Messages { get; init; } = [];
+    public bool LogonFailed { get; init; }
 }
 
 /// <summary>
@@ -20,6 +21,9 @@ public sealed class FakeSqlExecutor(TimeProvider time) : ISqlExecutor
 {
     public ConcurrentDictionary<string, FakeScript> Scripts { get; } = new();
     public ConcurrentQueue<SqlExecution> Calls { get; } = new();
+    public ConcurrentQueue<SqlConnectionSettings> Logons { get; } = new();
+    /// <summary>What Test connection gives. The default connects as the user (or "fake") to the server and database of the target.</summary>
+    public Func<SqlConnectionSettings, SqlLogon> Logon { get; set; } = c => new SqlLogon(c.Target.Server, c.Target.Database, c.Target.User ?? "fake");
 
     public async Task<SqlResult> ExecuteAsync(SqlExecution execution, Action<SqlMessage> onMessage, CancellationToken ct)
     {
@@ -28,6 +32,12 @@ public sealed class FakeSqlExecutor(TimeProvider time) : ISqlExecutor
         foreach (var m in script.Messages) onMessage(m);
         await Task.Delay(script.Duration, time, ct);
         if (script.Error is not null) onMessage(new SqlMessage(SqlMessageKind.Error, script.Error));
-        return new SqlResult(script.Status, script.Rows, script.Error);
+        return new SqlResult(script.Status, script.Rows, script.Error, script.LogonFailed);
+    }
+
+    public Task<SqlLogon> LogonAsync(SqlConnectionSettings connection, CancellationToken ct)
+    {
+        Logons.Enqueue(connection);
+        return Task.FromResult(Logon(connection));
     }
 }

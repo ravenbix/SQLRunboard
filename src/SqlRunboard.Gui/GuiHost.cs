@@ -39,6 +39,7 @@ public sealed class GuiHost : IAsyncDisposable
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseKestrel(k => k.Listen(IPAddress.Loopback, 0));
+        builder.Configuration["AllowedHosts"] = "127.0.0.1;localhost"; // the built-in host filtering answers 400 to other hosts
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(options.Executor);

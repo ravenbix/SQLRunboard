@@ -18,6 +18,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     readonly Dictionary<int, ActiveRun> runs = [];
     readonly List<Channel<Change>> subscribers = [];
     readonly Dictionary<int, string> loaded = []; // batch id -> the file text that the app last read or wrote
+    readonly HashSet<Task> finishing = []; // one per Running script: ends after Finish wrote its state and log
     int lastId, lastUntitled;
 
     public Batch NewBatch()
@@ -223,6 +224,15 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         return batch;
     }
 
+    /// <summary>Quit and Ctrl+C: cancels all scripts of all batches. The task ends when the Running scripts stopped and their logs are written.</summary>
+    public Task StopAsync()
+    {
+        int[] ids;
+        lock (gate) ids = [.. runs.Keys];
+        foreach (var id in ids) CancelAll(id);
+        lock (gate) return Task.WhenAll(finishing);
+    }
+
     /// <summary>
     /// Reruns one completed script of the current run. It goes to the bottom of the queue and reads its file again.
     /// Returns the batch, or null if no batch has this id.
@@ -303,8 +313,11 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, Password: null));
             // The continuation runs on the thread pool, never inline here under the lock.
             var cts = run.Tokens[path] = run.Settings.TimeoutSeconds is int s ? new CancellationTokenSource(TimeSpan.FromSeconds(s), time) : new CancellationTokenSource();
-            _ = executor.ExecuteAsync(execution, m => run.Log?.Append($"{attempt}: {(m.Kind == SqlMessageKind.Error ? "Error: " : "")}{m.Text}"), cts.Token)
-                .ContinueWith(t => Finish(id, run, path, start, t), TaskScheduler.Default);
+            Task? done = null;
+            // The continuation takes the lock, so it cannot remove 'done' before this method adds it.
+            done = executor.ExecuteAsync(execution, m => run.Log?.Append($"{attempt}: {(m.Kind == SqlMessageKind.Error ? "Error: " : "")}{m.Text}"), cts.Token)
+                .ContinueWith(t => { Finish(id, run, path, start, t); lock (gate) finishing.Remove(done!); }, TaskScheduler.Default);
+            finishing.Add(done);
         }
         run.Log?.Update(run.Scripts.Values, run.Settings.Target); // also for a run that is no longer current: its late ends go to its log
         var i = batches.FindIndex(b => b.Id == id);

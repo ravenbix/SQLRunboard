@@ -1,0 +1,951 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. The full SQLRunboard GUI from docs/spec.md "GUI", as one HTML file with a fake core.
+  Open it in a browser. 1 real second = 10 run seconds. Nothing touches a disk or a server.
+  Fake parts: logon (type "wrong" as the password to see a rejected password), scripts, file system, settings.json
+  (localStorage stands in for it). nightly-maintenance fails its first logon with "no Kerberos ticket" on purpose.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQLRunboard GUI Prototype</title>
+<style>
+:root {
+  --bg: #ffffff; --panel: #f6f8fa; --raise: #ffffff; --line: #d0d7de; --text: #1f2328; --muted: #59636e;
+  --grey: #6E7781; --yellow: #9A6700; --green: #1A7F37; --red: #CF222E; --on: #ffffff; --sel: #0969da; --selbg: #ddf4ff; --warnbg: #fff8c5;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #202020; --panel: #2a2a2a; --raise: #303030; --line: #3d444d; --text: #e6edf3; --muted: #9198a1;
+    --grey: #8B949E; --yellow: #D29922; --green: #3FB950; --red: #F85149; --on: #000000; --sel: #4493f8; --selbg: #1f3550; --warnbg: #3b2e00;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #202020; --panel: #2a2a2a; --raise: #303030; --line: #3d444d; --text: #e6edf3; --muted: #9198a1;
+  --grey: #8B949E; --yellow: #D29922; --green: #3FB950; --red: #F85149; --on: #000000; --sel: #4493f8; --selbg: #1f3550; --warnbg: #3b2e00;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+button, select, input { font: inherit; color: inherit; }
+button { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; cursor: pointer; white-space: nowrap; }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--sel); border-color: var(--sel); color: #fff; }
+input[type=text], input[type=number], input[type=password], select { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+:focus-visible { outline: 2px solid var(--sel); outline-offset: 1px; }
+a { color: var(--sel); }
+.tnum { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+.shell { display: flex; flex-direction: column; height: 100vh; }
+.topbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.topbar .app { font-weight: 700; margin-right: 8px; }
+.topbar .sp { flex: 1; }
+.topbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+[role="switch"] { appearance: none; position: relative; width: 28px; height: 16px; margin: 0; border-radius: 8px; background: var(--line); cursor: pointer; }
+[role="switch"]::before { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--bg); transition: left .15s; }
+[role="switch"]:checked { background: var(--sel); }
+[role="switch"]:checked::before { left: 14px; }
+[role="switch"]:focus-visible { outline: 2px solid var(--sel); outline-offset: 2px; }
+.body { flex: 1; display: flex; min-height: 0; }
+
+#side { width: 230px; flex: none; border-right: 1px solid var(--line); display: flex; flex-direction: column; overflow: auto; }
+#side h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 12px 4px; }
+#side ul { list-style: none; margin: 0; padding: 0 6px; }
+#side li { display: flex; gap: 8px; align-items: flex-start; padding: 6px; border-radius: 6px; cursor: pointer; }
+#side li[aria-selected=true] { background: var(--selbg); }
+#side li .n { font-weight: 600; }
+#side li .p { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#side li > div { min-width: 0; }
+#side > button { margin: 8px 12px; }
+
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#hdr { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 10px 16px 8px; }
+#hdr h1 { font-size: 16px; margin: 0; }
+.prog { flex-basis: 100%; height: 6px; background: var(--panel); border-radius: 3px; overflow: hidden; display: flex; }
+.prog i { display: block; height: 100%; }
+.banner { flex-basis: 100%; padding: 6px 10px; border-radius: 6px; background: var(--warnbg); border: 1px solid var(--line); }
+.banner.err { border-color: var(--red); }
+.tabs { display: flex; gap: 2px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 12px; }
+.tabs button[aria-selected=true] { border-bottom-color: var(--sel); font-weight: 600; }
+#panel { flex: 1; min-height: 0; overflow: auto; padding: 10px 16px 16px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 6px 0 0 6px; } .seg button:last-child { border-radius: 0 6px 6px 0; }
+.seg button[aria-pressed=true] { background: var(--selbg); border-color: var(--sel); }
+.note { color: var(--muted); margin: 0 0 8px; }
+
+.st { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; font-size: 11px; color: var(--on); flex: none; }
+.s-NotRun, .s-Queued { background: var(--grey); } .s-Running { background: var(--yellow); } .s-Succeeded { background: var(--green); } .s-Failed, .s-Cancelled { background: var(--red); }
+.hatch { background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(127,127,127,.6) 4px 6px); }
+.issel { background: var(--selbg) !important; outline: 2px solid var(--sel); outline-offset: -2px; }
+
+.board { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; align-items: start; }
+.col { background: var(--panel); border-radius: 8px; padding: 8px; }
+.col h3 { font-size: 12px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.card { background: var(--raise); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; margin-bottom: 6px; cursor: pointer; }
+.card .r1 { display: flex; gap: 6px; align-items: center; font-weight: 600; word-break: break-all; }
+.card .r2 { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; }
+th button { border: 0; background: none; padding: 0; font-weight: 600; color: var(--muted); }
+tbody tr { cursor: pointer; }
+td.num, th.num { text-align: right; }
+
+.tlg { display: grid; align-items: center; min-width: 560px; }
+.tlg > .c { padding: 0 6px; height: 26px; display: flex; align-items: center; gap: 6px; border-bottom: 1px dashed var(--line); white-space: nowrap; overflow: hidden; cursor: pointer; }
+.tlg > .h { padding: 0 6px; color: var(--muted); font-weight: 600; font-size: 12px; align-self: end; }
+.chart { position: relative; height: 26px; border-bottom: 1px dashed var(--line); cursor: pointer; }
+.bar { position: absolute; top: 4px; height: 18px; min-width: 2px; border-radius: 3px; color: var(--on); font-size: 11px; line-height: 18px; padding: 0 3px; overflow: hidden; white-space: nowrap; text-align: right; container-type: inline-size; }
+@container (max-width: 62px) { .bar .d { display: none; } }
+@container (max-width: 12px) { .bar .i { display: none; } }
+.brk { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(90deg, var(--line) 0 2px, transparent 2px 5px); opacity: .7; }
+.brkl { position: absolute; top: 0; font-size: 10px; color: var(--muted); white-space: nowrap; transform: translateX(-50%); background: var(--bg); padding: 0 2px; z-index: 1; }
+.axis { position: relative; height: 18px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.axis span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.axis span:first-child { transform: none; } .axis span:last-child { transform: translateX(-100%); }
+.striphead { position: relative; }
+.strip { height: 44px; display: block; width: 100%; }
+
+#drawer { width: 360px; flex: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+#drawer[hidden], #drawer-resize[hidden] { display: none; }
+#drawer-resize { width: 6px; margin-right: -6px; flex: none; cursor: col-resize; position: relative; z-index: 2; touch-action: none; }
+#drawer-resize:hover, #drawer-resize:focus-visible, #drawer-resize.drag { background: var(--sel); outline: none; }
+.dh { padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.dh .t { flex-basis: 100%; display: flex; gap: 6px; align-items: center; font-weight: 600; word-break: break-all; }
+.msgs { flex: 1; overflow: auto; padding: 8px 12px; font-size: 12px; }
+.msgs .sep { border-top: 1px solid var(--line); margin: 10px 0 4px; padding-top: 4px; color: var(--muted); font-weight: 600; }
+.msgs .sep:first-child { margin-top: 0; }
+.msgs .Error { color: var(--red); }
+.msgs .RowCount { color: var(--muted); }
+
+.src { margin: 0; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow: auto; tab-size: 4; }
+.src div { padding-right: 12px; }
+.src .ln { display: inline-block; width: 4ch; margin-right: 12px; text-align: right; color: var(--muted); user-select: none; }
+.src .go { color: var(--sel); font-weight: 600; }
+.src .cm { color: var(--muted); }
+.src .hl { background: color-mix(in srgb, var(--red) 18%, transparent); }
+.files { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.preview { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.preview h3 { margin: 0; padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.preview .src { max-height: 60vh; padding: 6px 0; }
+#drawer .src { flex: 1; padding: 8px 0; }
+a[data-line] { color: inherit; text-decoration: underline; }
+.form { display: grid; grid-template-columns: 190px minmax(0, 360px); gap: 8px 12px; align-items: center; }
+.form h3 { grid-column: 1 / -1; margin: 12px 0 0; font-size: 13px; }
+.form .hint { grid-column: 2; font-size: 12px; color: var(--muted); margin-top: -4px; }
+.badge { font-size: 11px; padding: 0 6px; border-radius: 10px; border: 1px solid var(--line); }
+.badge.new { border-color: var(--green); color: var(--green); }
+.badge.miss { border-color: var(--red); color: var(--red); }
+
+#dialog .ov { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 20; padding: 16px; }
+#dialog .dlg { background: var(--raise); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; width: 420px; max-width: 100%; box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+#dialog h2 { margin: 0 0 10px; font-size: 15px; }
+#dialog dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0 0 12px; }
+#dialog dt { color: var(--muted); }
+#dialog dd { margin: 0; }
+#dialog .btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+#dialog input { width: 100%; }
+#menu .m { position: fixed; z-index: 30; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.3); padding: 4px; min-width: 210px; }
+#menu button { display: flex; justify-content: space-between; gap: 16px; width: 100%; border: 0; background: none; text-align: left; padding: 5px 10px; border-radius: 5px; }
+#menu button:not(:disabled):hover, #menu button:focus { background: var(--selbg); }
+#menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+#toast { position: fixed; bottom: 16px; right: 16px; z-index: 40; background: #111; color: #fff; padding: 8px 14px; border-radius: 8px; max-width: calc(100% - 32px); }
+#toast:empty { display: none; }
+
+@media (max-width: 900px) {
+  .body { flex-direction: column; overflow: auto; }
+  #side { width: auto; border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
+  #drawer-resize { display: none; }
+  #drawer { width: auto !important; border-left: 0; border-top: 1px solid var(--line); max-height: 45vh; }
+  .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .form, .files { grid-template-columns: 1fr; } .form .hint { grid-column: 1; }
+  #panel { overflow-x: auto; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="topbar" role="toolbar" aria-label="App">
+    <span class="app">SQLRunboard</span>
+    <button data-cmd="new" title="Ctrl+N">New batch</button>
+    <button data-cmd="open" title="Ctrl+O">Open…</button>
+    <button data-cmd="save" title="Ctrl+S">Save</button>
+    <button data-cmd="saveAs" title="Ctrl+Shift+S">Save as…</button>
+    <button data-cmd="remove">Remove from list</button>
+    <button data-cmd="appData">Open app data folder</button>
+    <span class="sp"></span>
+    <label><input type="checkbox" role="switch" id="theme"> Dark</label>
+  </div>
+  <div class="body">
+    <nav id="side" aria-label="Batches"></nav>
+    <div class="main">
+      <header id="hdr"></header>
+      <div class="tabs" role="tablist" id="tabs"></div>
+      <div id="panel" role="tabpanel" data-scroll="panel"></div>
+    </div>
+    <div id="drawer-resize" role="separator" aria-orientation="vertical" aria-label="Drawer width" aria-controls="drawer" tabindex="0" hidden title="Drag to resize. Double-click to reset."></div>
+    <aside id="drawer" aria-label="Messages" hidden></aside>
+  </div>
+</div>
+<div id="dialog"></div>
+<div id="menu"></div>
+<div id="toast" role="status"></div>
+<div id="live" class="sr" aria-live="polite"></div>
+<script>
+'use strict';
+const SPEED = 10, TICK = 250; // run seconds per real second; the GUI tick from the spec
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+const MOD = isMac ? '⌘' : 'Ctrl+';
+
+// ---------- settings.json stand-in ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('sqlrunboard-proto:' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('sqlrunboard-proto:' + k, JSON.stringify(v)); } catch {} },
+};
+const app = { theme: store.get('theme', 'System'), view: store.get('view', 'board'), tlColumns: store.get('tlColumns', false), tlCollapse: store.get('tlCollapse', false), drawerWidth: store.get('drawerWidth', 360), batches: [], cur: null, untitled: 0, dialog: null, menu: null };
+
+// ---------- fake batches ----------
+let uid = 0;
+const DEF = { folder: '.', filters: '*.sql', recurse: false, parallelLimit: 4, stopOnFirstFailure: false, confirmBeforeRun: false, timeoutSeconds: '', server: '', database: '', auth: 'Integrated', user: '', encrypt: 'Mandatory', trustServerCertificate: false, extra: '' };
+function mkBatch(name, file, settings, scripts, extra = {}) {
+  return Object.assign({
+    id: ++uid, name, file, missing: false, dirty: false, tab: null, sel: null, drawer: false, password: null, signing: null,
+    logonMsg: null, testMsg: null, run: null, sort: null, fileSel: null, kerberosFails: 0, scrollAttempt: null,
+    settings: { ...DEF, ...settings },
+    scripts: scripts.map(([path, dur, out, rows, x = {}]) => ({ path, include: x.include ?? true, state: x.state ?? 'Listed', plan: { dur, out, rows, err: x.err, dur2: x.dur2 } })),
+  }, extra);
+}
+const deploy = mkBatch('deploy', '~/repos/sales-db/deploy.sqlrunboard.json',
+  { folder: 'scripts', server: 'sql01.example.local', database: 'Sales', auth: 'SqlServer', user: 'deploy', stopOnFirstFailure: true, confirmBeforeRun: true }, [
+  ['001_create_tables.sql', 20, 'ok', null], ['002_add_columns.sql', 15, 'ok', null], ['003_backfill_orders.sql', 180, 'ok', 1204331],
+  ['004_backfill_customers.sql', 110, 'ok', 88412],
+  ['005_fk_orders.sql', 30, 'fail', null, { err: 'line 214 (part 3): The ALTER TABLE statement conflicted with the FOREIGN KEY constraint "FK_orders_customers".' }],
+  ['000_old_seed.sql', 5, 'ok', null, { state: 'Missing' }],
+  ['006_index_orders.sql', 130, 'ok', null], ['007_views.sql', 12, 'ok', null], ['008_procs.sql', 18, 'opentran', null],
+  ['009_grants.sql', 6, 'ok', null], ['010_verify_counts.sql', 40, 'ok', 14], ['legacy_cleanup.sql', 50, 'ok', 3001, { include: false }],
+  ['011_hotfix_prices.sql', 25, 'ok', 42, { state: 'New' }],
+]);
+const nightly = mkBatch('nightly-maintenance', '~/ops/nightly-maintenance.sqlrunboard.json',
+  { server: 'sql02.example.local', database: 'Warehouse', auth: 'Integrated', parallelLimit: 3, timeoutSeconds: '240' }, [
+  ['01_rebuild_orders_ix.sql', 200, 'ok', null], ['02_rebuild_customers_ix.sql', 150, 'ok', null], ['03_update_stats.sql', 90, 'ok', null],
+  ['04_purge_audit.sql', 400, 'ok', 52000, { dur2: 70 }], ['05_shrink_log.sql', 20, 'ok', null], ['06_check_db.sql', 180, 'ok', null],
+], { kerberosFails: 1 });
+const perf = mkBatch('perf-tests', '~/bench/perf-tests.sqlrunboard.json',
+  { server: 'perf-sql.example.local', database: 'SalesCopy', auth: 'EntraInteractive', user: 'dba@example.com', parallelLimit: 8 },
+  Array.from({ length: 16 }, (_, i) => [`q${String(i + 1).padStart(2, '0')}_${['top_customers', 'monthly_sales', 'open_orders', 'stock_levels'][i % 4]}.sql`, 20 + (i * 37) % 100, 'ok', i % 3 ? (i * 7919) % 50000 : null]));
+const reporting = mkBatch('reporting', '~/repos/reporting/reporting.sqlrunboard.json', { server: 'sql03.example.local', database: 'Reports' }, [], { missing: true });
+app.batches = [deploy, nightly, perf, reporting];
+
+// ---------- fake core: run, attempts, events applied directly ----------
+const DONE = ['Succeeded', 'Failed', 'Cancelled'];
+const lastA = r => r.attempts[r.attempts.length - 1];
+const firstStart = r => Math.min(...r.attempts.filter(a => a.start != null).map(a => a.start));
+const planOf = (b, path) => b.scripts.find(s => s.path === path)?.plan ?? { dur: 30, out: 'ok', rows: null };
+function newRun(b, wall) { return { t: 0, wall, live: true, ended: false, restored: false, endAt: null, newest: 0, queue: [], rs: {} }; }
+function rsOf(run, path) { return run.rs[path] ??= { status: 'Queued', attempts: [], msgs: [] }; }
+function msg(b, path, kind, text) { const r = b.run.rs[path]; r.msgs.push({ a: r.attempts.length, kind, text, t: b.run.t }); }
+function queueAttempt(b, path) {
+  const r = rsOf(b.run, path);
+  r.attempts.push({ n: r.attempts.length + 1, status: 'Queued', start: null, end: null, rows: null, error: null });
+  r.status = 'Queued'; b.run.queue.push(path); b.run.ended = false;
+}
+function finish(b, path, status, err) {
+  const run = b.run, r = run.rs[path], a = lastA(r);
+  a.end = run.t; a.status = r.status = status; a.error = err ?? null;
+  if (err) msg(b, path, 'Error', err);
+  msg(b, path, 'Info', `Attempt ${a.n} ${status} after ${dur(a.end - a.start)}`);
+  if (status === 'Failed' && b.settings.stopOnFirstFailure) stopQueue(b);
+}
+function stopQueue(b) {
+  const run = b.run;
+  for (const path of run.queue) {
+    const r = run.rs[path], a = lastA(r);
+    a.status = r.status = 'Cancelled'; a.cancelAt = run.t; a.error = 'Not started: the queue stopped';
+    msg(b, path, 'Info', a.error);
+  }
+  run.queue = [];
+}
+function step(b, dt) {
+  const run = b.run, s = b.settings;
+  if (!run?.live) return;
+  run.t += dt;
+  if (run.ended) return;
+  const timeout = +s.timeoutSeconds || 0;
+  for (const [path, r] of Object.entries(run.rs)) {
+    if (r.status !== 'Running') continue;
+    const a = lastA(r), p = planOf(b, path), el = run.t - a.start, d = a.n > 1 && p.dur2 ? p.dur2 : p.dur;
+    if (a.rollback != null) { // open transaction check: the attempt keeps its slot until the rollback ends
+      if (run.t - a.rollback >= 5) { msg(b, path, 'Error', 'The app rolled back an open transaction (@@TRANCOUNT was 1)'); finish(b, path, 'Failed', 'Open transaction at the end of the script: rolled back. Add COMMIT and rerun.'); }
+      continue;
+    }
+    if (timeout && el >= timeout) { finish(b, path, 'Failed', `Timeout after ${timeout} s`); continue; }
+    if (!a.m1 && el >= d / 3) { a.m1 = 1; msg(b, path, 'Info', 'Step 1 of 3 done'); }
+    if (p.rows != null && !a.half && el >= d / 2) { a.half = 1; a.rows = Math.floor(p.rows / 2); msg(b, path, 'RowCount', `(${a.rows.toLocaleString()} rows affected)`); }
+    if (el >= d) {
+      if (p.out === 'fail' && a.n === 1) finish(b, path, 'Failed', p.err);
+      else if (p.out === 'opentran' && a.n === 1) { a.rollback = run.t; msg(b, path, 'Info', 'Rolling back an open transaction'); }
+      else { if (p.rows != null) { a.rows = p.rows; msg(b, path, 'RowCount', `(${(p.rows - Math.floor(p.rows / 2)).toLocaleString()} rows affected)`); } finish(b, path, 'Succeeded'); }
+    }
+  }
+  const limit = +s.parallelLimit || 1;
+  while (Object.values(run.rs).filter(r => r.status === 'Running').length < limit && run.queue.length) {
+    const path = run.queue.shift(), r = run.rs[path], a = lastA(r);
+    a.status = r.status = 'Running'; a.start = run.t; msg(b, path, 'Info', `Attempt ${a.n} started`);
+  }
+  if (!run.queue.length && !Object.values(run.rs).some(r => r.status === 'Running')) {
+    run.ended = true; run.endAt = run.t;
+    const c = counts(b);
+    if (b.live !== false) announce(`${b.name}: Run ended: ${c.Succeeded} succeeded, ${c.Failed + c.Cancelled} failed`);
+  }
+}
+function startRun(b) {
+  b.run = newRun(b, new Date());
+  for (const s of b.scripts) if (s.include && s.state !== 'Missing') queueAttempt(b, s.path);
+  b.tab = 'run'; step(b, 0);
+}
+function reopen(b) {
+  const run = b.run;
+  if (!run.live) { run.live = true; run.t = Math.max(run.t, run.newest) + 300; } // restored run: the clock moved on since the last time in summary.csv
+  run.ended = false; run.endAt = null;
+}
+function cancel(b, path) {
+  const run = b.run, r = run?.rs[path];
+  if (!r || run.ended) return;
+  if (r.status === 'Running' && lastA(r).rollback == null) finish(b, path, 'Cancelled', 'Cancelled by the user');
+  else if (r.status === 'Queued') {
+    run.queue = run.queue.filter(p => p !== path);
+    const a = lastA(r); a.status = r.status = 'Cancelled'; a.cancelAt = run.t; a.error = 'Not started: the queue stopped'; msg(b, path, 'Info', a.error);
+  }
+  step(b, 0);
+}
+function cancelAll(b) { if (!b.run || b.run.ended) return; stopQueue(b); for (const p of Object.keys(b.run.rs)) cancel(b, p); }
+function rerun(b, paths) {
+  paths = paths.filter(p => DONE.includes(b.run?.rs[p]?.status));
+  if (!paths.length) return;
+  const go = () => { if (b.run.ended) reopen(b); paths.forEach(p => queueAttempt(b, p)); step(b, 0); };
+  if (!b.run.ended) return go(); // a rerun during the run: no logon check, no confirm
+  logon(b, login => b.settings.confirmBeforeRun ? openDialog({ kind: 'confirm', b, login, n: paths.length, then: go }) : go());
+}
+function move(b, path, dir) {
+  const live = b.run && !b.run.ended;
+  if (live) { if (b.run.rs[path]?.status === 'Queued') moveIn(b.run.queue, path, dir); return; }
+  if (b.run || locked(b)) return;
+  const s = b.scripts.find(x => x.path === path);
+  if (s && moveIn(b.scripts, s, dir)) b.dirty = true;
+}
+function moveIn(arr, item, dir) {
+  const i = arr.indexOf(item); if (i < 0) return false;
+  arr.splice(i, 1);
+  const j = dir === 'top' ? 0 : dir === 'bottom' ? arr.length : dir === 'up' ? Math.max(0, i - 1) : Math.min(arr.length, i + 1);
+  arr.splice(j, 0, item); return i !== j;
+}
+const canMove = (b, path) => b.run ? !b.run.ended && b.run.rs[path]?.status === 'Queued' : !locked(b) && !!b.scripts.find(x => x.path === path);
+const locked = b => !!b.signing || !!(b.run && b.run.live && !b.run.ended);
+
+// fake logon check
+function logon(b, then) {
+  if (b.signing) return;
+  const s = b.settings;
+  b.logonMsg = null; b.testMsg = null;
+  if (!s.server || !s.database) { b.logonMsg = 'Set the server and the database in the Settings tab.'; return render(); }
+  if (s.auth === 'SqlServer' && !b.password) return openDialog({ kind: 'password', b, then });
+  const token = {};
+  b.signing = { token, text: s.auth === 'EntraInteractive' ? 'Signing in... Complete the sign-in in your browser.' : 'Signing in...' };
+  render();
+  setTimeout(() => {
+    if (b.signing?.token !== token) return; // cancelled: ignore the result
+    b.signing = null;
+    if (s.auth === 'SqlServer' && b.password === 'wrong') { b.password = null; openDialog({ kind: 'password', b, then, error: `Login failed for user '${s.user}'.` }); }
+    else if (s.auth === 'Integrated' && b.kerberosFails > 0) { b.kerberosFails--; b.logonMsg = 'Cannot authenticate using Kerberos: no ticket in the credential cache. Run kinit and try again.'; }
+    else then({ SqlServer: s.user, Integrated: 'EXAMPLE\\hank', EntraInteractive: s.user || 'dba@example.com', EntraDefault: 'sp-sqlrunboard-ci' }[s.auth]);
+    render();
+  }, s.auth === 'EntraInteractive' ? 3000 : 900);
+}
+function runBatch(b) {
+  if (b.missing || locked(b)) return;
+  const n = b.scripts.filter(s => s.include && s.state !== 'Missing').length;
+  logon(b, login => b.settings.confirmBeforeRun ? openDialog({ kind: 'confirm', b, login, n, then: () => startRun(b) }) : startRun(b));
+}
+
+// restored last runs (what summary.csv gives after a restart)
+function restore(b, wall, rows, newest) {
+  const run = b.run = newRun(b, wall);
+  Object.assign(run, { live: false, restored: true, ended: true, newest, endAt: newest });
+  for (const [path, n, status, start, end, rowsN, error] of rows) {
+    const r = rsOf(run, path);
+    r.attempts.push({ n, status, start, end, rows: rowsN, error, restored: true, barEnd: end ?? newest });
+    r.status = status;
+  }
+  run.t = newest;
+  run.unfinished = rows.some(x => x[6]?.startsWith('Interrupted'));
+}
+
+// fake file on disk: 3 parts split by GO; an error line in the plan holds the failing statement
+function scriptText(b, path) {
+  const sc = b.scripts.find(x => x.path === path), p = sc?.plan ?? {};
+  if (sc?.state === 'Missing') return null;
+  const errLine = +(p.err?.match(/^line (\d+)/)?.[1] ?? 0), n = errLine ? errLine + 16 : 40, mid = Math.floor(n / 2);
+  const tbl = path.replace(/\.sql$/, '').replace(/^[0-9a-z]*?\d+_/i, '').replace(/^(rebuild|update|backfill|purge|check|extract|find|missing|create|add|index|fk|verify)_/, '') || 'items';
+  const body = p.rows != null
+    ? [`RAISERROR('Batch %d', 0, 1, @i) WITH NOWAIT;`, `UPDATE TOP (5000) dbo.${tbl}`, `SET    processed = 1`, `WHERE  processed = 0;`, `SET @i += 1;`, '']
+    : [`-- step`, `IF OBJECT_ID('dbo.${tbl}') IS NOT NULL`, `    PRINT 'dbo.${tbl} exists';`, `EXEC sp_executesql N'SELECT 1';`, ''];
+  const L = [`-- ${path}`, `-- ${b.name}: prototype content. A rerun reads this file again.`, `SET XACT_ABORT ON;`, `PRINT 'Start ${path}';`, 'GO', `DECLARE @i int = 1;`];
+  if (p.out === 'opentran') L.push('BEGIN TRANSACTION;', '-- no COMMIT: the open transaction check rolls this back');
+  while (L.length < n) {
+    if (L.length + 1 === mid) L.push('GO');
+    else if (L.length + 1 === errLine) L.push(`ALTER TABLE dbo.orders ADD CONSTRAINT FK_orders_customers FOREIGN KEY (customer_id) REFERENCES dbo.customers (id);`);
+    else L.push(body[L.length % body.length]);
+  }
+  L.push('GO');
+  return L;
+}
+function renderSource(lines, hl) {
+  if (!lines) return '<p class="muted" style="padding:0 12px">The file is not on disk.</p>';
+  return `<div class="src" data-scroll="src" tabindex="0" aria-label="File content">${lines.map((t, i) => `<div id="L-${i + 1}" class="${i + 1 === hl ? 'hl' : ''}"><span class="ln">${i + 1}</span><span class="${/^\s*go\s*$/i.test(t) ? 'go' : /^\s*--/.test(t) ? 'cm' : ''}">${esc(t) || ' '}</span></div>`).join('')}</div>`;
+}
+const lineLink = text => esc(text).replace(/^line (\d+)/, (m, n) => `<a href="#" data-line="${n}">${m}</a>`);
+
+// ---------- view helpers ----------
+const ICON = { NotRun: '○', Queued: '○', Running: '▶', Succeeded: '✓', Failed: '✕', Cancelled: '✕' };
+const CVAR = { NotRun: '--grey', Queued: '--grey', Running: '--yellow', Succeeded: '--green', Failed: '--red', Cancelled: '--red' };
+const esc = x => String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const dur = sec => { sec = Math.max(0, Math.floor(sec)); const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60, p = n => String(n).padStart(2, '0'); return h ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`; };
+const words = sec => { sec = Math.floor(sec); const m = Math.floor(sec / 60), s = sec % 60; return [m && `${m} minute${m > 1 ? 's' : ''}`, `${s} second${s !== 1 ? 's' : ''}`].filter(Boolean).join(' '); };
+const p2 = n => String(n).padStart(2, '0');
+const stamp = d => `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+const clock = (run, sec) => new Date(run.wall.getTime() + sec * 1000).toLocaleTimeString([], { hour12: false });
+const bubble = st => `<span class="st s-${st}" aria-hidden="true">${ICON[st]}</span>`;
+const aEnd = (run, a) => a.end ?? (a.status === 'Running' ? run.t : a.barEnd ?? null);
+const elapsedOf = (b, r) => { const a = r && lastA(r); if (!a || a.start == null) return null; const e = aEnd(b.run, a); return e == null ? null : e - a.start; };
+const rowsOf = r => { const a = r && lastA(r); return a?.rows ?? null; };
+function counts(b) {
+  const c = { Queued: 0, Running: 0, Succeeded: 0, Failed: 0, Cancelled: 0 };
+  if (b.run) for (const r of Object.values(b.run.rs)) c[r.status]++;
+  return c;
+}
+function batchStatus(b) {
+  if (b.missing) return 'NotRun';
+  if (b.signing || (b.run && !b.run.ended)) return 'Running';
+  if (!b.run) return 'NotRun';
+  const c = counts(b); return c.Failed + c.Cancelled ? 'Failed' : 'Succeeded';
+}
+function progressText(b) {
+  if (b.missing) return 'File not found';
+  if (b.signing) return 'Signing in...';
+  if (!b.run) return 'Not run yet';
+  const c = counts(b), n = Object.keys(b.run.rs).length, bad = c.Failed + c.Cancelled;
+  return `${c.Succeeded + bad}/${n}${bad ? `, ${bad} failed` : ''}`;
+}
+// one row per script: the run rows, or the Queued rows before the first run
+function rowsFor(b) {
+  if (!b.run) return b.scripts.filter(s => s.include && s.state !== 'Missing').map((s, i) => ({ path: s.path, r: { status: 'Queued', attempts: [], msgs: [], virtual: true }, q: i + 1 }));
+  return Object.entries(b.run.rs).map(([path, r]) => ({ path, r, q: r.status === 'Queued' ? b.run.queue.indexOf(path) + 1 : null }));
+}
+function runOrder(b) { // start of the first attempt; Queued at the bottom in queue order
+  const rows = rowsFor(b); if (!b.run) return rows;
+  const started = rows.filter(x => x.r.attempts.some(a => a.start != null)).sort((x, y) => firstStart(x.r) - firstStart(y.r));
+  const queued = b.run.queue.map(p => rows.find(x => x.path === p)).filter(x => x && !started.includes(x));
+  return [...started, ...queued, ...rows.filter(x => !started.includes(x) && !queued.includes(x))];
+}
+function boardCols(b) {
+  const rows = rowsFor(b), endKey = x => { const a = lastA(x.r); return a ? a.end ?? a.cancelAt ?? a.barEnd ?? 0 : 0; };
+  return [
+    ['Queued', rows.filter(x => x.r.status === 'Queued').sort((x, y) => x.q - y.q)],
+    ['Running', rows.filter(x => x.r.status === 'Running').sort((x, y) => lastA(x.r).start - lastA(y.r).start)],
+    ['Succeeded', rows.filter(x => x.r.status === 'Succeeded').sort((x, y) => endKey(y) - endKey(x))],
+    ['Failed / Cancelled', rows.filter(x => x.r.status === 'Failed' || x.r.status === 'Cancelled').sort((x, y) => endKey(y) - endKey(x))],
+  ];
+}
+function tableOrder(b) {
+  const rows = runOrder(b), s = b.sort; if (!s) return rows;
+  const key = { q: x => x.q ?? 1e9, status: x => x.r.status, script: x => x.path, start: x => lastA(x.r)?.start ?? 1e12, elapsed: x => elapsedOf(b, x.r) ?? -1, attempts: x => x.r.attempts.length, rows: x => rowsOf(x.r) ?? -1 }[s.key];
+  return rows.slice().sort((x, y) => { const p = key(x), q = key(y); return (p < q ? -1 : p > q ? 1 : 0) * s.dir || x.path.localeCompare(y.path); });
+}
+const viewList = b => app.view === 'board' ? boardCols(b).flatMap(c => c[1]) : app.view === 'table' ? tableOrder(b) : runOrder(b);
+function ariaRow(b, x) {
+  const e = elapsedOf(b, x.r), rows = rowsOf(x.r);
+  return `${x.path}, ${x.r.virtual ? 'Not run yet' : x.r.status}, attempt ${Math.max(1, x.r.attempts.length)}${e != null ? `, elapsed ${words(e)}` : ''}, ${rows == null ? 'rows unknown' : rows + ' rows'}`;
+}
+const cur = () => app.batches.find(b => b.id === app.cur);
+const item = (b, x) => `data-path="${esc(x.path)}" data-k="s:${esc(x.path)}" tabindex="${b.sel === x.path ? 0 : -1}" aria-label="${esc(ariaRow(b, x))}"`;
+const selCls = (b, x) => b.sel === x.path ? 'issel' : '';
+
+// ---------- render ----------
+function renderSide() {
+  return `<h2 id="side-h">Batches</h2><ul role="listbox" aria-labelledby="side-h">${app.batches.map(b => {
+    const st = batchStatus(b), sel = b.id === app.cur;
+    return `<li role="option" aria-selected="${sel}" tabindex="${sel ? 0 : -1}" data-batch="${b.id}" data-k="b:${b.id}"
+      aria-label="${esc(`${b.name}, ${st === 'NotRun' ? 'Not run yet' : st}, ${progressText(b).replace('/', ' of ').replace(/^(\d+ of \d+)/, '$1 done')}`)}">
+      ${bubble(st)}<div><div class="n">${esc(b.name)}${b.dirty ? ' •' : ''}${b.file ? '' : ' <span class="muted">(unsaved)</span>'}</div>
+      <div class="p">${esc(progressText(b))}</div>${b.missing ? `<div class="p tnum">${esc(b.file)}</div>` : ''}</div></li>`;
+  }).join('')}</ul><button data-cmd="new">+ New batch</button>`;
+}
+function renderHeader(b) {
+  if (!b) return '<p class="muted">No batch. Select New batch or Open.</p>';
+  if (b.missing) return `<h1>${esc(b.name)}</h1><div class="banner err">File not found: <span class="tnum">${esc(b.file)}</span>. The batch stays in the list, because the drive can come back. <button data-cmd="remove">Remove from list</button></div>`;
+  const s = b.settings, c = counts(b), run = b.run, n = run ? Object.keys(run.rs).length : 0, live = run && !run.ended, bad = c.Failed + c.Cancelled;
+  const seg = (k, v) => n ? `<i style="width:${100 * v / n}%;background:var(${CVAR[k]})"></i>` : '';
+  return `<h1>${esc(b.name)}${b.dirty ? ' •' : ''}</h1>
+    <span class="tnum muted">${esc(s.server || '(no server)')} / ${esc(s.database || '(no database)')}</span>
+    <span class="muted">Parallel ${esc(s.parallelLimit)}</span>
+    ${b.signing ? `<span>${esc(b.signing.text)}</span><button data-cmd="cancelSignIn">Cancel</button>`
+      : `<button class="primary" data-cmd="run" title="F5" ${live ? 'disabled' : ''}>Run</button>`}
+    <button data-cmd="cancelAll" title="Shift+F5" ${live ? '' : 'disabled'}>Cancel all</button>
+    <button data-cmd="rerunFailed" ${bad && !b.signing ? '' : 'disabled'}>Rerun all failed</button>
+    <span>${run ? `${c.Succeeded + bad} of ${n} done${bad ? `, ${bad} failed` : ''}${run.ended ? ' · Run ended' : ''}` : 'Not run yet'}</span>
+    <div class="prog" aria-hidden="true">${seg('Succeeded', c.Succeeded)}${seg('Failed', bad)}${seg('Running', c.Running)}</div>
+    ${b.logonMsg ? `<div class="banner err" role="alert">${esc(b.logonMsg)}</div>` : ''}`;
+}
+function renderTabs(b) {
+  if (!b || b.missing) return '';
+  return ['run', 'files', 'settings'].map((t, i) => `<button role="tab" id="tab-${t}" aria-selected="${b.tab === t}" tabindex="${b.tab === t ? 0 : -1}" data-tab="${t}" title="${MOD}${i + 1}">${t[0].toUpperCase() + t.slice(1)}</button>`).join('');
+}
+function renderRun(b) {
+  const run = b.run;
+  let head = `<div class="toolbar"><div class="seg" role="group" aria-label="View">${['board', 'table', 'timeline'].map(v => `<button data-view="${v}" aria-pressed="${app.view === v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>`;
+  if (app.view === 'timeline') head += `<label><input type="checkbox" data-tl="tlColumns" ${app.tlColumns ? 'checked' : ''}> Columns</label><label><input type="checkbox" data-tl="tlCollapse" ${app.tlCollapse ? 'checked' : ''}> Collapse idle gaps</label>`;
+  head += '</div>';
+  if (run?.restored && !run.live) head += `<p class="note">Last run, from <span class="tnum">logs/${esc(b.name)}_${stamp(run.wall)}/summary.csv</span>.${run.unfinished ? ` Interrupted: the app stopped at or after ${clock(run, run.newest)}.` : ''} Rerun opens this run again. Run starts a new run.</p>`;
+  if (!run) head += '<p class="note">No run yet. These scripts are Queued in the start order. Move them here or in the Files tab.</p>';
+  return head + (app.view === 'board' ? renderBoard(b) : app.view === 'table' ? renderTable(b) : renderTimeline(b));
+}
+function cardMeta(b, x) {
+  const e = elapsedOf(b, x.r), rows = rowsOf(x.r), parts = [];
+  if (x.r.status === 'Queued') parts.push(`#${x.q}`);
+  if (e != null) parts.push(dur(e));
+  parts.push(`attempt ${Math.max(1, x.r.attempts.length)}`, `${rows == null ? '—' : rows.toLocaleString()} rows`);
+  if (x.r.status === 'Cancelled') parts.push('<b>Cancelled</b>');
+  if (x.r.status === 'Running' && lastA(x.r).rollback != null) parts.push('<b>Rolling back</b>');
+  return parts.map(p => `<span>${p}</span>`).join('');
+}
+function renderBoard(b) {
+  return `<div class="board">${boardCols(b).map(([title, list]) => `<section class="col" aria-label="${title}"><h3>${title} · ${list.length}</h3>${list.map(x => `
+    <div class="card ${selCls(b, x)}" ${item(b, x)}><div class="r1">${bubble(x.r.status)}<span>${esc(x.path)}</span></div><div class="r2">${cardMeta(b, x)}</div></div>`).join('')}</section>`).join('')}</div>`;
+}
+function renderTable(b) {
+  const th = (k, t, cls = '') => { const s = b.sort?.key === k ? (b.sort.dir > 0 ? ' ▲' : ' ▼') : ''; return `<th class="${cls}" aria-sort="${s ? (b.sort.dir > 0 ? 'ascending' : 'descending') : 'none'}"><button data-sort="${k}">${t}${s}</button></th>`; };
+  return `<table><thead><tr>${th('q', '#', 'num')}${th('status', 'Status')}${th('script', 'Script')}${th('start', 'Start')}${th('elapsed', 'Elapsed', 'num')}${th('attempts', 'Attempts', 'num')}${th('rows', 'Rows', 'num')}</tr></thead><tbody>
+    ${tableOrder(b).map(x => { const a = lastA(x.r), e = elapsedOf(b, x.r), rows = rowsOf(x.r); return `<tr class="${selCls(b, x)}" ${item(b, x)}>
+      <td class="num">${x.q ?? ''}</td><td>${bubble(x.r.status)} ${x.r.virtual ? 'Not run yet' : x.r.status}</td><td class="tnum">${esc(x.path)}</td>
+      <td>${a?.start != null ? clock(b.run, a.start) : ''}</td><td class="num">${e != null ? dur(e) : ''}</td><td class="num">${Math.max(1, x.r.attempts.length)}</td>
+      <td class="num">${rows == null ? '—' : rows.toLocaleString()}</td></tr>`; }).join('')}</tbody></table>`;
+}
+// timeline layout: time -> 0..1, with idle gaps over 1 minute cut when Collapse is on
+function tlScale(b) {
+  const run = b.run, T = Math.max(run.ended ? run.endAt : run.t, 1);
+  const iv = Object.values(run.rs).flatMap(r => r.attempts).filter(a => a.start != null).map(a => [a.start, aEnd(run, a) ?? a.start]).sort((p, q) => p[0] - q[0]);
+  const merged = [];
+  for (const [s, e] of iv) { const m = merged[merged.length - 1]; if (m && s <= m[1]) m[1] = Math.max(m[1], e); else merged.push([s, e]); }
+  let gaps = [];
+  if (app.tlCollapse) for (let i = 1; i < merged.length; i++) if (merged[i][0] - merged[i - 1][1] > 60) gaps.push({ s: merged[i - 1][1], e: merged[i][0] });
+  const kept = T - gaps.reduce((n, g) => n + g.e - g.s, 0), G = gaps.length ? 0.05 * kept / Math.max(0.2, 1 - 0.05 * gaps.length) : 0, D = kept + G * gaps.length;
+  const f = x => { let off = 0; for (const g of gaps) { if (x <= g.s) break; if (x >= g.e) off += g.e - g.s - G; else return (g.s - off + (x - g.s) / (g.e - g.s) * G) / D; } return Math.min(1, (x - off) / D); };
+  const inv = p => { const y = p * D; let off = 0; for (const g of gaps) { const ds = g.s - off; if (y <= ds) break; if (y < ds + G) return null; off += g.e - g.s - G; } return y + off; };
+  return { T, f, inv, gaps, G: G / D };
+}
+function renderTimeline(b) {
+  const run = b.run, rows = runOrder(b), cols = app.tlColumns;
+  const gridCols = cols ? '36px 110px minmax(150px, 220px) 70px 64px 56px minmax(300px, 1fr)' : 'minmax(140px, 220px) minmax(300px, 1fr)';
+  const names = x => cols
+    ? `<div class="c ${selCls(b, x)}" ${item(b, x)}>${x.q ?? ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${bubble(x.r.status)} ${x.r.virtual ? 'Not run yet' : x.r.status}</div><div class="c tnum ${selCls(b, x)}" data-path="${esc(x.path)}">${esc(x.path)}</div>
+       <div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${lastA(x.r)?.start != null ? clock(run, lastA(x.r).start) : ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${elapsedOf(b, x.r) != null ? dur(elapsedOf(b, x.r)) : ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${Math.max(1, x.r.attempts.length)}</div>`
+    : `<div class="c ${selCls(b, x)}" ${item(b, x)}>${bubble(x.r.status)}<span class="tnum">${esc(x.path)}</span></div>`;
+  const lead = cols ? '<div class="h">#</div><div class="h">Status</div><div class="h">Script</div><div class="h">Start</div><div class="h">Elapsed</div><div class="h">Att.</div>' : '<div class="h"></div>';
+  if (!run) return `<p class="muted">No run yet</p><div class="tlg" style="grid-template-columns:${gridCols}">${lead}<div class="h"></div>${rows.map(x => names(x) + '<div class="chart"></div>').join('')}</div>`;
+  const sc = tlScale(b), limit = +b.settings.parallelLimit || 1;
+  const pts = [];
+  for (let i = 0; i <= 300; i++) {
+    const p = i / 300, t = sc.inv(p);
+    pts.push([p, t == null ? 0 : Object.values(run.rs).reduce((n, r) => n + r.attempts.filter(a => a.start != null && a.start <= t && (aEnd(run, a) ?? a.start) > t).length, 0)]);
+  }
+  const top = Math.max(limit, ...pts.map(q => q[1])) + 1;
+  const path = pts.map(([x, y], i) => i ? `H${x}V${top - y}` : `M0 ${top - y}`).join('');
+  const ticks = [0, .25, .5, .75, 1].map(p => { const t = sc.inv(p); return `<span style="left:${p * 100}%">${t == null ? '' : dur(t)}</span>`; }).join('');
+  const breaks = sc.gaps.map(g => `<div class="brk" style="left:${sc.f(g.s) * 100}%;width:${sc.G * 100}%"></div>`).join('');
+  const breakLabels = sc.gaps.map(g => `<div class="brkl" style="left:${(sc.f(g.s) + sc.G / 2) * 100}%">⋯ ${dur(g.e - g.s)} idle</div>`).join('');
+  const bars = x => x.r.attempts.filter(a => a.start != null).map(a => {
+    const e = aEnd(run, a) ?? a.start, l = sc.f(a.start), w = sc.f(e) - l, d = dur(e - a.start), st = a.status, icon = a.error?.startsWith('Interrupted') ? '✕' : ICON[st];
+    const tip = `Attempt ${a.n} ${st}\nStart ${clock(run, a.start)}\nEnd ${a.end != null ? clock(run, a.end) : st === 'Running' ? '(running)' : '(interrupted)'}\nDuration ${d}`;
+    return `<div class="bar ${st === 'Cancelled' ? 'hatch' : ''}" style="left:${l * 100}%;width:${w * 100}%;background:var(${CVAR[st]})" data-path="${esc(x.path)}" data-att="${a.n}" title="${esc(tip)}"
+      role="img" aria-label="${esc(`${x.path}, attempt ${a.n}, ${st}, started ${clock(run, a.start)}, duration ${words(e - a.start)}`)}"><span class="d">${d} </span><span class="i">${icon}</span></div>`;
+  }).join('');
+  return `<div class="muted" style="margin-bottom:4px">Run started ${clock(run, 0)} · ${run.wall.toLocaleDateString()}</div>
+    <div class="tlg" style="grid-template-columns:${gridCols}">
+      ${lead}<div class="striphead" aria-hidden="true">${breakLabels}
+        <svg class="strip" viewBox="0 0 1 ${top}" preserveAspectRatio="none">
+          <line x1="0" x2="1" y1="${top - limit}" y2="${top - limit}" stroke="var(--muted)" stroke-dasharray="5 4" vector-effect="non-scaling-stroke"/>
+          <path d="${path}V${top}H0Z" fill="var(--yellow)" fill-opacity=".18" stroke="none"/>
+          <path d="${path}" fill="none" stroke="var(--yellow)" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>
+        <div class="axis">${ticks}</div></div>
+      ${rows.map(x => `${names(x)}<div class="chart ${selCls(b, x)}" data-path="${esc(x.path)}">${breaks}${bars(x)}</div>`).join('')}
+    </div><p class="muted" style="font-size:12px">Step chart: running scripts. Dashed line: parallel limit ${limit}.</p>`;
+}
+function renderFiles(b) {
+  const lk = locked(b), sel = b.fileSel;
+  return `${lk ? '<div class="banner" style="margin-bottom:10px">The run locks the file check boxes. You can still move Queued scripts in the Run tab.</div>' : ''}
+    <div class="toolbar"><span class="muted">Folder <span class="tnum">${esc(b.settings.folder)}</span> · Filters <span class="tnum">${esc(b.settings.filters)}</span></span>
+      ${['top', 'up', 'down', 'bottom'].map(d => `<button data-fmove="${d}" ${lk || !sel ? 'disabled' : ''}>${{ top: 'Move to top', up: 'Move up', down: 'Move down', bottom: 'Move to bottom' }[d]}</button>`).join('')}
+      <button data-cmd="sortFiles" ${lk ? 'disabled' : ''}>Sort by file name</button></div>
+    <div class="files"><table><thead><tr><th>Run</th><th class="num">#</th><th>File</th><th>State</th></tr></thead><tbody>
+    ${b.scripts.map((s, i) => `<tr data-file="${esc(s.path)}" data-k="f:${esc(s.path)}" tabindex="${sel === s.path ? 0 : -1}" class="${sel === s.path ? 'issel' : ''}">
+      <td><input type="checkbox" data-include="${esc(s.path)}" aria-label="Include ${esc(s.path)}" ${s.include ? 'checked' : ''} ${lk || s.state === 'Missing' ? 'disabled' : ''}></td>
+      <td class="num">${i + 1}</td><td class="tnum">${esc(s.path)}</td>
+      <td>${s.state === 'New' ? '<span class="badge new">New</span>' : s.state === 'Missing' ? '<span class="badge miss">⚠ Missing on disk. The next save removes it.</span>' : ''}${s.include ? '' : ' <span class="muted">skipped</span>'}</td></tr>`).join('')}
+    </tbody></table>
+    <section class="preview" aria-label="File content">${sel ? `<h3 class="tnum">${esc(sel)}</h3>${renderSource(scriptText(b, sel))}` : '<p class="muted" style="padding:0 12px">Select a file to see its content.</p>'}</section></div>`;
+}
+function renderSettings(b) {
+  const s = b.settings, lk = locked(b), dis = lk ? 'disabled' : '';
+  const txt = (k, label, x = '') => `<label for="set-${k}">${label}</label><input type="text" id="set-${k}" data-set="${k}" data-k="set:${k}" value="${esc(s[k])}" ${dis} ${x}>`;
+  const chk = (k, label) => `<span></span><label><input type="checkbox" data-set="${k}" data-k="set:${k}" ${s[k] ? 'checked' : ''} ${dis}> ${label}</label>`;
+  const sel = (k, label, opts) => `<label for="set-${k}">${label}</label><select id="set-${k}" data-set="${k}" data-k="set:${k}" ${dis}>${opts.map(([v, t]) => `<option value="${v}" ${s[k] === v ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
+  const abs = /^([a-zA-Z]:|\/|~)/.test(s.folder);
+  return `${lk ? '<div class="banner" style="margin-bottom:10px">The run locks the settings.</div>' : ''}
+  <div class="form">
+    <h3>Scripts</h3>${txt('folder', 'Folder')}${abs ? '<div class="hint">⚠ Not portable: an absolute folder.</div>' : ''}
+    ${txt('filters', 'File filters')}<div class="hint">Separate filters with ;. Only * and ? are wildcards.</div>
+    ${chk('recurse', 'Search subfolders')}
+    <h3>Run</h3><label for="set-parallelLimit">Parallel limit</label><input type="number" min="1" max="64" id="set-parallelLimit" data-set="parallelLimit" data-k="set:parallelLimit" value="${esc(s.parallelLimit)}" ${dis}>
+    <label for="set-timeoutSeconds">Command timeout (s)</label><input type="number" min="1" id="set-timeoutSeconds" data-set="timeoutSeconds" data-k="set:timeoutSeconds" value="${esc(s.timeoutSeconds)}" placeholder="None" ${dis}>
+    <div class="hint">The total time of one attempt, for all parts.</div>
+    ${chk('stopOnFirstFailure', 'Stop the queue at the first failure')}${chk('confirmBeforeRun', 'Confirm before run')}
+    <h3>Target</h3>${txt('server', 'Server')}${txt('database', 'Database')}
+    ${sel('auth', 'Logon', [['Integrated', 'Integrated (Windows or Kerberos)'], ['SqlServer', 'SQL Server'], ['EntraInteractive', 'Microsoft Entra ID, interactive'], ['EntraDefault', 'Microsoft Entra ID, default']])}
+    ${s.auth === 'SqlServer' || s.auth === 'EntraInteractive' ? txt('user', s.auth === 'SqlServer' ? 'User' : 'Account hint') : ''}
+    ${s.auth === 'SqlServer' ? '<div class="hint">The app asks for the password at the first run and keeps it in memory.</div>' : ''}
+    ${sel('encrypt', 'Encrypt', [['Mandatory', 'Mandatory'], ['Optional', 'Optional'], ['Strict', 'Strict']])}
+    ${chk('trustServerCertificate', 'Trust server certificate')}${txt('extra', 'Additional connection string')}
+    <span></span><div><button data-cmd="test" ${lk ? 'disabled' : ''}>Test connection</button> <span role="status">${esc(b.testMsg ?? '')}</span></div>
+  </div>`;
+}
+function renderDrawer(b) {
+  if (!b || !b.drawer || !b.sel) return '';
+  const x = rowsFor(b).find(y => y.path === b.sel);
+  if (!x) return '';
+  const r = x.r, a = lastA(r), live = b.run && !b.run.ended, mv = canMove(b, x.path);
+  let body = '';
+  if (r.virtual) body = '<p class="muted">No run yet.</p>';
+  for (const at of r.attempts) {
+    body += `<div class="sep" id="att-${at.n}">Attempt ${at.n}${at.start != null ? ` · ${clock(b.run, at.start)}` : ''} · ${at.status}</div>`;
+    if (at.restored) body += `${at.error ? `<div class="Error">${lineLink(at.error)}</div>` : ''}<div class="muted">Full messages: <a href="#" data-cmd="runlog">run.log</a></div>`;
+    else body += r.msgs.filter(m => m.a === at.n).map(m => `<div class="${m.kind}"><span class="muted tnum">${clock(b.run, m.t)}</span> ${m.kind === 'Error' ? lineLink(m.text) : esc(m.text)}</div>`).join('');
+  }
+  return `<div class="dh"><div class="t">${bubble(r.status)}<span>${esc(x.path)}</span></div>
+    <button data-cmd="dCancel" ${live && (r.status === 'Queued' || (r.status === 'Running' && a.rollback == null)) ? '' : 'disabled'}>Cancel</button>
+    <button data-cmd="dRerun" ${DONE.includes(r.status) && !b.signing ? '' : 'disabled'}>Rerun</button>
+    ${['top', 'up', 'down', 'bottom'].map(d => `<button data-dmove="${d}" aria-label="${{ top: 'Move to top', up: 'Move up', down: 'Move down', bottom: 'Move to bottom' }[d]}" title="${{ top: 'Move to top (Alt+Home)', up: 'Move up (Alt+↑)', down: 'Move down (Alt+↓)', bottom: 'Move to bottom (Alt+End)' }[d]}" ${mv ? '' : 'disabled'}>${{ top: '⤒', up: '↑', down: '↓', bottom: '⤓' }[d]}</button>`).join('')}
+    <button data-cmd="closeDrawer" aria-label="Close drawer" title="Esc">✕</button>
+    <div class="seg" role="group" aria-label="Drawer view" style="flex-basis:100%"><button data-dview="messages" aria-pressed="${b.dview !== 'script'}">Messages</button><button data-dview="script" aria-pressed="${b.dview === 'script'}">Script</button></div></div>
+    ${b.dview === 'script' ? renderSource(scriptText(b, x.path), b.hlLine) : `<div class="msgs" data-scroll="msgs">${body}</div>`}
+    <p class="muted" style="font-size:11px;margin:0;padding:6px 12px;border-top:1px solid var(--line)">PRINT output can arrive late. For live progress, use RAISERROR('text', 0, 1) WITH NOWAIT.</p>`;
+}
+let lastLock = null;
+const FOCUS_ATTRS = ['data-dview', 'data-k', 'data-cmd', 'data-tab', 'data-view', 'data-sort', 'data-tl', 'data-dmove', 'data-fmove', 'data-include', 'data-set'];
+function focusSel(el) {
+  const scope = el?.closest?.('#side, #hdr, #tabs, #panel, #drawer, .topbar'); if (!scope) return null;
+  const a = FOCUS_ATTRS.find(x => el.hasAttribute(x)); if (!a) return null;
+  return `${scope.id ? '#' + scope.id : '.topbar'} [${a}="${CSS.escape(el.getAttribute(a))}"]`;
+}
+const refocus = sel => sel && document.querySelector(sel)?.focus({ preventScroll: true });
+function render(o = {}) {
+  const b = cur(), ae = document.activeElement, k = focusSel(ae);
+  const panelEl = document.getElementById('panel'), drawerEl = document.getElementById('drawer');
+  const msgsEl = drawerEl.querySelector('.msgs'), msgsBottom = msgsEl && msgsEl.scrollTop + msgsEl.clientHeight >= msgsEl.scrollHeight - 4, msgsTop = msgsEl?.scrollTop;
+  const pTop = panelEl.scrollTop, pLeft = panelEl.scrollLeft;
+  if (b && !b.missing && !b.tab) b.tab = b.run ? 'run' : 'files';
+  document.getElementById('side').innerHTML = renderSide();
+  document.getElementById('hdr').innerHTML = renderHeader(b);
+  document.getElementById('tabs').innerHTML = renderTabs(b);
+  const lk = b ? b.id + ':' + locked(b) : '', liveView = !!(b?.run && !b.run.ended) || !!b?.signing;
+  const rebuild = !o.tick || lk !== lastLock || (b?.tab === 'run' && liveView); // do not rebuild a form while you type, or a still view under a tooltip
+  if (rebuild) {
+    panelEl.innerHTML = !b || b.missing ? '' : b.tab === 'run' ? renderRun(b) : b.tab === 'files' ? renderFiles(b) : renderSettings(b);
+    panelEl.setAttribute('aria-labelledby', b && !b.missing ? 'tab-' + b.tab : '');
+    panelEl.scrollTop = pTop; panelEl.scrollLeft = pLeft;
+    if (!panelEl.querySelector('[data-k][tabindex="0"]')) panelEl.querySelector('[data-k^="s:"], [data-k^="f:"]')?.setAttribute('tabindex', '0'); // roving tab stop
+  }
+  lastLock = lk;
+  const srcTop = drawerEl.querySelector('.src')?.scrollTop;
+  if (rebuild || liveView) { const dh = renderDrawer(b); drawerEl.hidden = !dh; drawerEl.innerHTML = dh; document.getElementById('drawer-resize').hidden = !dh; }
+  const src = drawerEl.querySelector('.src');
+  if (src) { if (b.scrollLine) { src.querySelector('#L-' + b.scrollLine)?.scrollIntoView({ block: 'center' }); b.scrollLine = null; } else if (srcTop != null) src.scrollTop = srcTop; }
+  const m = rebuild || liveView ? drawerEl.querySelector('.msgs') : null;
+  if (m) {
+    if (b.scrollAttempt) { m.querySelector('#att-' + b.scrollAttempt)?.scrollIntoView({ block: 'start' }); b.scrollAttempt = null; }
+    else m.scrollTop = msgsBottom || msgsTop == null ? m.scrollHeight : msgsTop;
+  }
+  if (k && document.activeElement !== ae) refocus(k);
+}
+function announce(text) { document.getElementById('live').textContent = text; toast(text); }
+let toastTimer;
+function toast(text) { const t = document.getElementById('toast'); t.textContent = text; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.textContent = '', 4000); }
+
+// ---------- dialogs and menu ----------
+function openDialog(d) { app.dialog = { ...d, back: app.dialog?.back ?? focusSel(document.activeElement) }; renderDialog(); }
+function closeDialog() { const back = app.dialog?.back; app.dialog = null; renderDialog(); render(); refocus(back); }
+function renderDialog() {
+  const d = app.dialog, el = document.getElementById('dialog');
+  if (!d) return el.innerHTML = '';
+  const s = d.b?.settings;
+  const body = {
+    password: () => `<h2 id="dlg-t">Sign in to ${esc(s.server)}</h2><dl><dt>Database</dt><dd>${esc(s.database)}</dd><dt>User</dt><dd>${esc(s.user)}</dd></dl>
+      ${d.error ? `<p role="alert" style="color:var(--red)">${esc(d.error)} Type the password again.</p>` : ''}
+      <label>Password <input type="password" id="dlg-in" autocomplete="off"></label><p class="muted" style="font-size:12px">Prototype: any text signs in. "wrong" is rejected.</p>
+      <div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Sign in</button></div>`,
+    confirm: () => `<h2 id="dlg-t">Run ${esc(d.b.name)}?</h2><p>The target is protected. Check it before the run.</p>
+      <dl><dt>Server</dt><dd class="tnum">${esc(s.server)}</dd><dt>Database</dt><dd class="tnum">${esc(s.database)}</dd><dt>Login</dt><dd class="tnum">${esc(d.login)}</dd><dt>Scripts</dt><dd>${d.n}</dd></dl>
+      <div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Run</button></div>`,
+    saveAs: () => `<h2 id="dlg-t">Save as</h2><label>File name <input type="text" id="dlg-in" value="${esc(d.b.name)}.sqlrunboard.json"></label>
+      <p class="muted" style="font-size:12px">The batch name is the file name without .sqlrunboard.json.</p>
+      <div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Save</button></div>`,
+    closeRun: () => `<h2 id="dlg-t">Close SQLRunboard?</h2><p>${esc(d.text)}</p><div class="btns"><button data-dlg="cancel">Keep open</button><button class="primary" data-dlg="ok">Cancel all and close</button></div>`,
+  }[d.kind]();
+  el.innerHTML = `<div class="ov"><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-t">${body}</div></div>`;
+  (el.querySelector('#dlg-in') ?? el.querySelector('.primary')).focus();
+}
+function dialogOk() {
+  const d = app.dialog, v = document.getElementById('dlg-in')?.value ?? '';
+  if (d.kind === 'password') { if (!v) return; d.b.password = v; app.dialog = null; renderDialog(); logon(d.b, d.then); return; }
+  if (d.kind === 'confirm') { app.dialog = null; renderDialog(); d.then(); render(); return; }
+  if (d.kind === 'saveAs') {
+    if (!v.trim()) return;
+    const b = d.b; b.file = (b.file ? b.file.replace(/[^/]+$/, '') : '~/sql/') + v.trim();
+    b.name = v.trim().replace(/\.sqlrunboard\.json$|\.json$/i, ''); saveBatch(b); closeDialog(); return;
+  }
+  closeDialog();
+}
+function saveBatch(b) {
+  if (!b.file) return openDialog({ kind: 'saveAs', b });
+  b.scripts = b.scripts.filter(s => s.state !== 'Missing').map(s => ({ ...s, state: 'Listed' }));
+  b.dirty = false; toast(`Saved ${b.file}`); render();
+}
+function openMenu(b, path, x, y) {
+  const r = rowsFor(b).find(z => z.path === path)?.r; if (!r) return;
+  b.sel = path;
+  const live = b.run && !b.run.ended, mv = canMove(b, path);
+  const it = (cmd, label, key, ok) => `<button role="menuitem" data-mcmd="${cmd}" ${ok ? '' : 'disabled'}><span>${label}</span><span class="muted">${key}</span></button>`;
+  app.menu = { b, path, back: focusSel(document.activeElement) };
+  const el = document.getElementById('menu');
+  el.innerHTML = `<div class="m" role="menu" aria-label="${esc(path)}" style="left:${Math.min(x, innerWidth - 230)}px;top:${Math.min(y, innerHeight - 260)}px">
+    ${it('open', 'Show messages', 'Enter', true)}
+    ${it('cancel', 'Cancel', '', live && (r.status === 'Queued' || (r.status === 'Running' && lastA(r).rollback == null)))}
+    ${it('rerun', 'Rerun', '', DONE.includes(r.status) && !b.signing)}<hr>
+    ${it('top', 'Move to top', 'Alt+Home', mv)}${it('up', 'Move up', 'Alt+↑', mv)}${it('down', 'Move down', 'Alt+↓', mv)}${it('bottom', 'Move to bottom', 'Alt+End', mv)}</div>`;
+  el.querySelector('button:not(:disabled)')?.focus();
+  render();
+}
+function closeMenu(refocusBack = true) { const back = app.menu?.back; app.menu = null; document.getElementById('menu').innerHTML = ''; if (refocusBack) refocus(back); }
+
+// ---------- commands ----------
+function selectBatch(id) { app.cur = id; closeMenu(false); render(); }
+function newBatch() {
+  const b = mkBatch(`Untitled ${++app.untitled}`, null, { folder: '~/sql/adhoc', server: 'localhost', database: 'Scratch' },
+    [['check_blocking.sql', 15, 'ok', null], ['find_big_tables.sql', 25, 'ok', 120], ['missing_indexes.sql', 35, 'ok', 18], ['wait_stats.sql', 10, 'ok', null]]);
+  b.dirty = true; app.batches.push(b); app.cur = b.id; b.tab = 'settings'; render();
+}
+let opened = false;
+function openBatch() {
+  if (!opened) { opened = true; app.batches.push(mkBatch('etl-load', '~/etl/etl-load.sqlrunboard.json', { server: 'etl-sql.example.local', database: 'Staging', auth: 'EntraDefault', parallelLimit: 2 },
+    [['10_extract_orders.sql', 60, 'ok', 50000], ['20_extract_items.sql', 80, 'ok', 210000], ['30_transform.sql', 45, 'ok', null], ['40_load.sql', 90, 'ok', 260000]])); }
+  const b = app.batches.find(x => x.name === 'etl-load'); selectBatch(b.id); toast('Prototype: Open adds etl-load.sqlrunboard.json.');
+}
+function removeBatch(b) {
+  if (!b || locked(b)) return toast('Cancel the run before you remove the batch.');
+  const i = app.batches.indexOf(b); app.batches.splice(i, 1);
+  app.cur = app.batches[Math.min(i, app.batches.length - 1)]?.id ?? null; toast(`Removed ${b.name} from the list. The file stays on disk.`); render();
+}
+function selectScript(b, path, openDrawer) { b.sel = path; if (openDrawer) b.drawer = true; render(); }
+function cmd(c, el) {
+  const b = cur();
+  switch (c) {
+    case 'new': return newBatch();
+    case 'open': return openBatch();
+    case 'save': return b && !b.missing && saveBatch(b);
+    case 'saveAs': return b && !b.missing && openDialog({ kind: 'saveAs', b });
+    case 'remove': return removeBatch(b);
+    case 'appData': return toast(`Prototype: opens ${isMac ? '~/Library/Application Support/sqlrunboard' : '%LOCALAPPDATA%\\sqlrunboard'} in the file manager.`);
+    case 'run': return runBatch(b);
+    case 'cancelSignIn': b.signing = null; return render();
+    case 'cancelAll': cancelAll(b); return render();
+    case 'rerunFailed': rerun(b, Object.entries(b.run.rs).filter(([, r]) => r.status === 'Failed' || r.status === 'Cancelled').map(([p]) => p)); return render();
+    case 'dCancel': cancel(b, b.sel); return render();
+    case 'dRerun': rerun(b, [b.sel]); return render();
+    case 'closeDrawer': b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel)}"]`)?.focus();
+    case 'runlog': return toast('Prototype: opens run.log in the default app.');
+    case 'test': return logon(b, login => { b.testMsg = `Connected. Server ${b.settings.server.split('.')[0].toUpperCase()}, database ${b.settings.database}, login ${login}.`; });
+    case 'sortFiles': b.scripts.sort((x, y) => x.path.localeCompare(y.path, undefined, { numeric: true, sensitivity: 'base' })); b.dirty = true; return render();
+  }
+}
+
+// ---------- events ----------
+document.addEventListener('click', e => {
+  if (app.menu && !e.target.closest('#menu')) closeMenu(false);
+  const t = e.target, b = cur();
+  const dlg = t.closest('[data-dlg]'); if (dlg) { e.preventDefault(); return dlg.dataset.dlg === 'ok' ? dialogOk() : closeDialog(); }
+  const mc = t.closest('[data-mcmd]');
+  if (mc) {
+    const { b: mb, path } = app.menu, c = mc.dataset.mcmd; closeMenu();
+    if (c === 'open') selectScript(mb, path, true); else if (c === 'cancel') cancel(mb, path); else if (c === 'rerun') rerun(mb, [path]); else move(mb, path, c);
+    return render();
+  }
+  const c = t.closest('[data-cmd]'); if (c) { e.preventDefault(); return cmd(c.dataset.cmd, c); }
+  const bt = t.closest('[data-batch]'); if (bt) return selectBatch(+bt.dataset.batch);
+  if (!b) return;
+  const tab = t.closest('[data-tab]'); if (tab) { b.tab = tab.dataset.tab; return render(); }
+  const v = t.closest('[data-view]'); if (v) { app.view = v.dataset.view; store.set('view', app.view); return render(); }
+  const so = t.closest('[data-sort]'); if (so) { const k = so.dataset.sort; b.sort = b.sort?.key === k ? (b.sort.dir > 0 ? { key: k, dir: -1 } : null) : { key: k, dir: 1 }; return render(); }
+  const dv = t.closest('[data-dview]'); if (dv) { b.dview = dv.dataset.dview; b.hlLine = null; return render(); }
+  const ln = t.closest('[data-line]'); if (ln) { e.preventDefault(); b.dview = 'script'; b.hlLine = b.scrollLine = +ln.dataset.line; return render(); }
+  const dm = t.closest('[data-dmove]'); if (dm) { move(b, b.sel, dm.dataset.dmove); return render(); }
+  const fm = t.closest('[data-fmove]'); if (fm) { const s = b.scripts.find(x => x.path === b.fileSel); if (s && moveIn(b.scripts, s, fm.dataset.fmove)) b.dirty = true; return render(); }
+  if (t.matches('[data-include]')) return;
+  const fr = t.closest('[data-file]'); if (fr) { b.fileSel = fr.dataset.file; render(); return document.querySelector(`[data-k="f:${CSS.escape(b.fileSel)}"]`)?.focus(); }
+  const bar = t.closest('[data-att]'); if (bar) { b.scrollAttempt = +bar.dataset.att; return selectScript(b, bar.dataset.path, true); }
+  const p = t.closest('[data-path]'); if (p) { selectScript(b, p.dataset.path, true); document.querySelector(`[data-k="s:${CSS.escape(p.dataset.path)}"]`)?.focus({ preventScroll: true }); }
+});
+document.addEventListener('contextmenu', e => {
+  const p = e.target.closest('#panel [data-path]'), b = cur();
+  if (!p || !b) return;
+  e.preventDefault(); openMenu(b, p.dataset.path, e.clientX, e.clientY);
+});
+document.addEventListener('change', e => {
+  const t = e.target, b = cur();
+  if (t.id === 'theme') { app.theme = t.checked ? 'Dark' : 'Light'; store.set('theme', app.theme); return applyTheme(); }
+  if (t.dataset.tl) { app[t.dataset.tl] = t.checked; store.set(t.dataset.tl, t.checked); return render(); }
+  if (!b) return;
+  if (t.dataset.include) { b.scripts.find(s => s.path === t.dataset.include).include = t.checked; b.dirty = true; return render(); }
+  if (t.dataset.set) {
+    const k = t.dataset.set; let v = t.type === 'checkbox' ? t.checked : t.value;
+    if (k === 'parallelLimit') { v = Math.min(64, Math.max(1, Math.round(+v || 1))); t.value = v; }
+    b.settings[k] = v; b.dirty = true; b.testMsg = null;
+    render({ tick: k !== 'auth' }); // the logon type changes which fields show
+  }
+});
+document.addEventListener('keydown', e => {
+  const b = cur(), mod = isMac ? e.metaKey : e.ctrlKey, t = e.target;
+  if (app.dialog) {
+    if (e.key === 'Escape') closeDialog();
+    else if (e.key === 'Enter' && !t.matches('button')) { e.preventDefault(); dialogOk(); }
+    else if (e.key === 'Tab') { const f = [...document.querySelectorAll('#dialog input, #dialog button')]; const i = f.indexOf(t); if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); } else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); } }
+    return;
+  }
+  if (app.menu) {
+    const items = [...document.querySelectorAll('#menu button:not(:disabled)')], i = items.indexOf(t);
+    if (e.key === 'Escape') { e.preventDefault(); closeMenu(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length]?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus(); }
+    else if (e.key === 'Tab') closeMenu();
+    return;
+  }
+  if (mod && !e.altKey) {
+    const k = e.key.toLowerCase();
+    if (k === 'n') { e.preventDefault(); return newBatch(); }
+    if (k === 'o') { e.preventDefault(); return openBatch(); }
+    if (k === 's') { e.preventDefault(); return cmd(e.shiftKey ? 'saveAs' : 'save'); }
+    if (b && !b.missing && ['1', '2', '3'].includes(e.key)) { e.preventDefault(); b.tab = ['run', 'files', 'settings'][+e.key - 1]; render(); return document.getElementById('tab-' + b.tab)?.focus(); }
+  }
+  if (e.key === 'F5') { e.preventDefault(); return b && (e.shiftKey ? (cancelAll(b), render()) : runBatch(b)); }
+  const inText = t.matches('input[type=text], input[type=number], input[type=password], select');
+  if (inText) return;
+  const dirs = { ArrowUp: 'up', ArrowDown: 'down', Home: 'top', End: 'bottom' };
+  // side list
+  const li = t.closest('#side [data-batch]');
+  if (li) {
+    const lb = app.batches.find(x => x.id === +li.dataset.batch), i = app.batches.indexOf(lb);
+    if (e.altKey && dirs[e.key]) { e.preventDefault(); moveIn(app.batches, lb, dirs[e.key]); render(); return document.querySelector(`[data-k="b:${lb.id}"]`)?.focus(); }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const nb = app.batches[i + (e.key === 'ArrowDown' ? 1 : -1)]; if (nb) { selectBatch(nb.id); document.querySelector(`[data-k="b:${nb.id}"]`)?.focus(); } }
+    if (e.key === 'Delete') removeBatch(lb);
+    return;
+  }
+  // tabs
+  if (t.matches('[role=tab]') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    const tabs = ['run', 'files', 'settings'], i = tabs.indexOf(b.tab); b.tab = tabs[(i + (e.key === 'ArrowRight' ? 1 : 2)) % 3]; render(); return document.getElementById('tab-' + b.tab).focus();
+  }
+  // files tab
+  const fr = t.closest('[data-file]');
+  if (fr && b) {
+    const list = b.scripts.map(s => s.path), i = list.indexOf(fr.dataset.file);
+    if (e.altKey && dirs[e.key]) { e.preventDefault(); if (!locked(b) && moveIn(b.scripts, b.scripts[i], dirs[e.key])) b.dirty = true; render(); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); b.fileSel = list[Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; render(); }
+    else if (e.key === ' ' && !locked(b) && b.scripts[i].state !== 'Missing') { e.preventDefault(); b.scripts[i].include = !b.scripts[i].include; b.dirty = true; render(); }
+    else return;
+    return document.querySelector(`[data-k="f:${CSS.escape(b.fileSel)}"]`)?.focus();
+  }
+  // run views
+  const it = t.closest('#panel [data-path][data-k]');
+  if (e.key === 'Escape' && b?.drawer) { b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel ?? '')}"]`)?.focus(); }
+  if (!it || !b) return;
+  const path = it.dataset.path;
+  if (e.altKey && dirs[e.key]) { e.preventDefault(); move(b, path, dirs[e.key]); render(); return document.querySelector(`[data-k="s:${CSS.escape(path)}"]`)?.focus(); }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault(); const list = viewList(b).map(x => x.path), i = list.indexOf(path), np = list[Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))];
+    b.sel = np; render(); return document.querySelector(`[data-k="s:${CSS.escape(np)}"]`)?.focus();
+  }
+  if (e.key === 'Enter') { e.preventDefault(); selectScript(b, path, true); return document.querySelector(`[data-k="s:${CSS.escape(path)}"]`)?.focus(); }
+  if ((e.key === 'F10' && e.shiftKey) || e.key === 'ContextMenu') { e.preventDefault(); const r = it.getBoundingClientRect(); openMenu(b, path, r.left + 20, r.bottom); }
+});
+window.addEventListener('beforeunload', e => { // stands in for the close prompts
+  if (app.batches.some(b => b.dirty || locked(b))) { e.preventDefault(); e.returnValue = ''; }
+});
+// drawer splitter: drag, arrow keys (Shift for big steps), Home/End, double-click to reset
+const DRAWER_MIN = 260, drawerMax = () => Math.max(DRAWER_MIN, Math.round(innerWidth * 0.7));
+function setDrawerWidth(w, save) {
+  app.drawerWidth = Math.round(Math.min(drawerMax(), Math.max(DRAWER_MIN, w)));
+  document.getElementById('drawer').style.width = app.drawerWidth + 'px';
+  const h = document.getElementById('drawer-resize');
+  h.setAttribute('aria-valuenow', app.drawerWidth); h.setAttribute('aria-valuemin', DRAWER_MIN); h.setAttribute('aria-valuemax', drawerMax());
+  if (save) store.set('drawerWidth', app.drawerWidth);
+}
+{
+  const h = document.getElementById('drawer-resize');
+  h.addEventListener('pointerdown', e => {
+    e.preventDefault(); h.setPointerCapture(e.pointerId); h.classList.add('drag');
+    const x0 = e.clientX, w0 = app.drawerWidth;
+    const mv = ev => setDrawerWidth(w0 + x0 - ev.clientX);
+    const up = () => { h.classList.remove('drag'); h.removeEventListener('pointermove', mv); setDrawerWidth(app.drawerWidth, true); };
+    h.addEventListener('pointermove', mv); h.addEventListener('pointerup', up, { once: true }); h.addEventListener('pointercancel', up, { once: true });
+  });
+  h.addEventListener('dblclick', () => setDrawerWidth(360, true));
+  h.addEventListener('keydown', e => {
+    const step = e.shiftKey ? 80 : 20, w = { ArrowLeft: app.drawerWidth + step, ArrowRight: app.drawerWidth - step, Home: drawerMax(), End: DRAWER_MIN }[e.key];
+    if (w != null) { e.preventDefault(); e.stopPropagation(); setDrawerWidth(w, true); }
+  });
+  addEventListener('resize', () => setDrawerWidth(app.drawerWidth));
+}
+function applyTheme() {
+  const r = document.documentElement;
+  if (app.theme === 'System') delete r.dataset.theme; else r.dataset.theme = app.theme.toLowerCase();
+  document.getElementById('theme').checked = app.theme === 'Dark' || (app.theme === 'System' && darkQuery.matches);
+}
+const darkQuery = matchMedia('(prefers-color-scheme: dark)');
+darkQuery.addEventListener('change', applyTheme);
+
+const today = (h, m, s) => { const d = new Date(); d.setHours(h, m, s, 0); return d; };
+restore(nightly, today(2, 0, 0), [
+  ['01_rebuild_orders_ix.sql', 1, 'Succeeded', 0, 230, null, null], ['02_rebuild_customers_ix.sql', 1, 'Succeeded', 0, 180, null, null],
+  ['03_update_stats.sql', 1, 'Succeeded', 0, 95, null, null], ['04_purge_audit.sql', 1, 'Failed', 95, 335, 31200, 'Timeout after 240 s'],
+  ['05_shrink_log.sql', 1, 'Succeeded', 180, 200, null, null], ['06_check_db.sql', 1, 'Succeeded', 200, 390, null, null],
+  ['04_purge_audit.sql', 2, 'Failed', 3900, null, 4100, 'Interrupted: the app stopped during the attempt'],
+], 4110);
+(() => { // perf-tests: a finished green run, made by the fake core
+  startRun(perf); perf.live = false;
+  while (!perf.run.ended) step(perf, 1);
+  perf.live = undefined;
+  const rows = Object.entries(perf.run.rs).flatMap(([p, r]) => r.attempts.map(a => [p, a.n, a.status, a.start, a.end, a.rows, a.error]));
+  restore(perf, today(11, 20, 5), rows, perf.run.endAt); perf.tab = null;
+})();
+applyTheme();
+setDrawerWidth(app.drawerWidth);
+app.cur = deploy.id;
+render();
+setInterval(() => { for (const b of app.batches) step(b, SPEED * TICK / 1000); render({ tick: true }); }, TICK);
+</script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# .NET build output
+bin/
+obj/
+artifacts/
+publish/
+*.user
+*.suo
+
+# Tests
+TestResults/
+coverage/
+*.trx
+playwright-report/
+
+# IDEs
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# Operating systems
+.DS_Store
+Thumbs.db

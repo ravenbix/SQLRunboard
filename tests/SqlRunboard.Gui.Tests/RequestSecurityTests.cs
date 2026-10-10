@@ -37,4 +37,24 @@ public class RequestSecurityTests
 
         Assert.Equal(expected, res.StatusCode);
     }
+
+    [Theory]
+    [InlineData("application/json", HttpStatusCode.OK)]
+    [InlineData("application/json; charset=utf-8", HttpStatusCode.OK)]
+    [InlineData(null, HttpStatusCode.UnsupportedMediaType)]
+    [InlineData("text/plain", HttpStatusCode.UnsupportedMediaType)]
+    [InlineData("application/x-www-form-urlencoded", HttpStatusCode.UnsupportedMediaType)]
+    [InlineData("multipart/form-data; boundary=x", HttpStatusCode.UnsupportedMediaType)]
+    public async Task A_POST_is_accepted_only_as_JSON(string? contentType, HttpStatusCode expected)
+    {
+        await using var app = await TestApp.StartAsync();
+        var body = new ByteArrayContent("{}"u8.ToArray());
+        if (contentType is not null) body.Headers.TryAddWithoutValidation("Content-Type", contentType);
+
+        var res = await app.Client().PostAsync("/api/batches", body, Ct);
+
+        Assert.Equal(expected, res.StatusCode);
+        using var sub = app.Host.Batches.Subscribe();
+        Assert.Equal(expected == HttpStatusCode.OK ? 1 : 0, sub.Snapshot.Count);
+    }
 }

@@ -72,13 +72,22 @@ public sealed class GuiHost : IAsyncDisposable
 
     public BatchList Batches => app.Services.GetRequiredService<BatchList>();
 
-    /// <summary>Other web sites must not use the server: reject an <c>Origin</c> other than our own.</summary>
+    /// <summary>
+    /// Other web sites must not use the server: reject an <c>Origin</c> other than our own, and a <c>POST</c> that is not
+    /// <c>application/json</c> (a form or <c>text/plain</c> POST is a "simple" cross-site request with no CORS preflight).
+    /// </summary>
     static async Task RejectForeignRequests(HttpContext ctx, RequestDelegate next)
     {
         var origin = ctx.Request.Headers.Origin;
         if (origin.Count > 0 && origin != $"{ctx.Request.Scheme}://{ctx.Request.Host}")
         {
             ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        if (HttpMethods.IsPost(ctx.Request.Method)
+            && !string.Equals(ctx.Request.GetTypedHeaders().ContentType?.MediaType.Value, "application/json", StringComparison.OrdinalIgnoreCase))
+        {
+            ctx.Response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
             return;
         }
         await next(ctx);

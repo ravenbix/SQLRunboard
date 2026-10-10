@@ -89,6 +89,40 @@ public class BoardTests : AppPageTest
         await Expect(Panel.GetByLabel("Include a.sql")).ToBeEnabledAsync();
     }
 
+    [Fact]
+    public async Task Cancel_a_script_from_its_card_menu_and_the_rest_with_Cancel_all()
+    {
+        var b = NewBatch(1, "a.sql", "b.sql", "c.sql");
+        Script("a.sql", 60);
+        App.Host.Batches.Run(b.Id);
+        await Side(b.Name).ClickAsync();
+
+        await Column("Queued").Locator(".card:has-text('b.sql')").ClickAsync(new() { Button = MouseButton.Right });
+        await Page.GetByRole(AriaRole.Menuitem, new() { Name = "Cancel" }).ClickAsync();
+        await Expect(Cards("Failed / Cancelled")).ToHaveTextAsync(["b.sql"]);
+        await Expect(Column("Failed / Cancelled").Locator(".card .r2")).ToContainTextAsync("Cancelled");
+
+        await Header.GetByRole(AriaRole.Button, new() { Name = "Cancel all" }).ClickAsync();
+        await Expect(Cards("Failed / Cancelled")).ToHaveCountAsync(3);
+        await Expect(Cards("Running")).ToHaveCountAsync(0);
+        await Expect(Header.GetByRole(AriaRole.Button, new() { Name = "Run", Exact = true })).ToBeEnabledAsync();
+    }
+
+    [Fact]
+    public async Task The_drawer_of_a_script_that_did_not_start_says_why()
+    {
+        var b = NewBatch(1, "a.sql", "b.sql");
+        App.Host.Batches.UpdateSettings(b.Id, b.Settings with { StopOnFirstFailure = true });
+        Script("a.sql", 5, ScriptStatus.Failed);
+        App.Host.Batches.Run(b.Id);
+        await Side(b.Name).ClickAsync();
+
+        App.Time.Advance(TimeSpan.FromSeconds(5));
+        await Expect(Cards("Failed / Cancelled")).ToHaveTextAsync(["a.sql", "b.sql"]); // a script with 0 attempts has no end time: it goes at the bottom
+        await Column("Failed / Cancelled").Locator(".card:has-text('b.sql')").ClickAsync();
+        await Expect(Page.Locator("#drawer .msgs")).ToContainTextAsync("Not started: the queue stopped");
+    }
+
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();

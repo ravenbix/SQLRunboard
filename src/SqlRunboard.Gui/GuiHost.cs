@@ -22,6 +22,7 @@ public sealed record GuiHostOptions(string AppDataFolder, ISqlExecutor Executor,
 
 public sealed record IncludeRequest(string Path, bool Include);
 public sealed record FolderRequest(string? Path);
+public sealed record ScriptRequest(string Path);
 
 /// <summary>The local web server: Kestrel on 127.0.0.1, a random port, a random token. See docs/SPEC.md "GUI host".</summary>
 public sealed class GuiHost : IAsyncDisposable
@@ -79,6 +80,10 @@ public sealed class GuiHost : IAsyncDisposable
             list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/run", (int id, BatchList list) =>
             list.Run(id) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/cancel", (int id, ScriptRequest r, BatchList list) =>
+            list.Cancel(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/cancel-all", (int id, BatchList list) =>
+            list.CancelAll(id) is { } b ? Results.Ok(b) : Results.NotFound());
         // The browser has no folder picker that gives a path, so the page browses the folders here.
         app.MapPost("/api/folders", (FolderRequest r) =>
         {

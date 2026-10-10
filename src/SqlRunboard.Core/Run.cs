@@ -3,8 +3,8 @@ namespace SqlRunboard.Core;
 /// <summary>One attempt of one script. End is null while it runs.</summary>
 public sealed record Attempt(DateTimeOffset Start, DateTimeOffset? End, ScriptStatus Status, long? Rows, string? Error);
 
-/// <summary>One script of a run. Status is the status of the last attempt, or Queued.</summary>
-public sealed record ScriptRun(string Path, ScriptStatus Status, IReadOnlyList<Attempt> Attempts);
+/// <summary>One script of a run. Status is the status of the last attempt, or Queued. Error: why a script with 0 attempts did not start.</summary>
+public sealed record ScriptRun(string Path, ScriptStatus Status, IReadOnlyList<Attempt> Attempts, string? Error = null);
 
 /// <summary>
 /// The current run of a batch, as the page sees it. Scripts are in the start order; Queue has the Queued paths in queue order.

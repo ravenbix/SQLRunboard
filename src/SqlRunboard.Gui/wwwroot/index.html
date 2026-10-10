@@ -217,7 +217,7 @@ const toView = sb => ({ ...sb, run: toRun(sb.run), settings: { ...sb.settings, .
 function toRun(r) {
   if (!r) return null;
   const t0 = Date.parse(r.start), sec = x => x == null ? null : (Date.parse(x) - t0) / 1000, skew = Date.parse(r.now) - Date.now(), rs = {};
-  for (const s of r.scripts) rs[s.path] = { status: s.status, msgs: [], attempts: s.attempts.map((a, i) => ({ n: i + 1, start: sec(a.start), end: sec(a.end), status: a.status, rows: a.rows, error: a.error })) };
+  for (const s of r.scripts) rs[s.path] = { status: s.status, error: s.error, msgs: [], attempts: s.attempts.map((a, i) => ({ n: i + 1, start: sec(a.start), end: sec(a.end), status: a.status, rows: a.rows, error: a.error })) };
   const ended = !r.scripts.some(s => s.status === 'Queued' || s.status === 'Running');
   return { rs, queue: r.queue, wall: new Date(t0), live: true, ended, endAt: ended ? Math.max(0, ...Object.values(rs).flatMap(x => x.attempts.map(a => a.end ?? 0))) : null, get t() { return (Date.now() + skew - t0) / 1000; } };
 }
@@ -266,7 +266,7 @@ const locked = b => !!b.signing || !!(b.run && b.run.live && !b.run.ended);
 
 // ponytail: stand-ins for the commands of later tickets. Each ticket replaces its names with a POST.
 const todo = () => toast('Not available yet.');
-const cancel = todo, cancelAll = todo, rerun = todo, move = todo, logon = todo, saveBatch = todo, openBatch = todo, removeBatch = todo;
+const rerun = todo, move = todo, logon = todo, saveBatch = todo, openBatch = todo, removeBatch = todo;
 // Edits go to the server one at a time, in the order you make them.
 let edits = Promise.resolve();
 const sendEdit = (url, body) => edits = edits.then(() => post(url, body)).catch(e => { toast(e.message); return null; });
@@ -279,6 +279,8 @@ async function runBatch(b) {
   const sb = await sendEdit(`/api/batches/${b.id}/run`, {});
   if (sb) { upsert(sb); b.tab = 'run'; render(); }
 }
+const cancel = (b, path) => sendEdit(`/api/batches/${b.id}/cancel`, { path });
+const cancelAll = b => sendEdit(`/api/batches/${b.id}/cancel-all`, {});
 function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
 async function browse(b, path) { // the folder dialog: the server lists the folders
   try { openDialog({ kind: 'folder', b, ...await post('/api/folders', { path }) }); } catch { if (path) browse(b, null); else toast('The folder list is not available.'); }
@@ -511,6 +513,7 @@ function renderDrawer(b) {
   const r = x.r, a = lastA(r), live = b.run && !b.run.ended, mv = canMove(b, x.path);
   let body = '';
   if (r.virtual) body = '<p class="muted">No run yet.</p>';
+  else if (!r.attempts.length && r.error) body = `<div class="Error">${esc(r.error)}</div>`; // did not start
   for (const at of r.attempts) {
     body += `<div class="sep" id="att-${at.n}">Attempt ${at.n}${at.start != null ? ` · ${clock(b.run, at.start)}` : ''} · ${at.status}</div>`;
     if (at.restored) body += `${at.error ? `<div class="Error">${lineLink(at.error)}</div>` : ''}<div class="muted">Full messages: <a href="#" data-cmd="runlog">run.log</a></div>`;

@@ -212,10 +212,16 @@ const app = { theme: store.get('theme', 'System'), view: store.get('view', 'boar
 // The server keeps all batch state. Each server batch merges into a page object that also keeps the view state (tab, selection, drawer).
 // The page uses the flat settings of the prototype; the server uses the batch file shape (target is nested).
 const toView = sb => ({ ...sb, settings: { ...sb.settings, ...sb.settings.target, extra: sb.settings.target.extraConnectionString, timeoutSeconds: sb.settings.timeoutSeconds ?? '' } });
+const fromView = s => ({ folder: s.folder || null, filters: s.filters, recurse: s.recurse, parallelLimit: +s.parallelLimit, stopOnFirstFailure: s.stopOnFirstFailure, confirmBeforeRun: s.confirmBeforeRun,
+  timeoutSeconds: s.timeoutSeconds === '' ? null : +s.timeoutSeconds,
+  target: { server: s.server, database: s.database, auth: s.auth, user: s.user, passwordVariable: s.passwordVariable, encrypt: s.encrypt, trustServerCertificate: s.trustServerCertificate, extraConnectionString: s.extra } });
 function upsert(sb) {
   let b = app.batches.find(x => x.id === sb.id);
   if (!b) app.batches.push(b = { missing: false, tab: null, sel: null, drawer: false, run: null, scripts: [], signing: null, logonMsg: null, testMsg: null, sort: null, fileSel: null });
-  return Object.assign(b, toView(sb));
+  const mine = b.saving ? b.settings : null; // while my settings are on the way, an older echo must not undo them
+  Object.assign(b, toView(sb));
+  if (mine) b.settings = mine;
+  return b;
 }
 async function post(url, body = {}) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -252,6 +258,17 @@ const locked = b => !!b.signing || !!(b.run && b.run.live && !b.run.ended);
 // ponytail: stand-ins for the commands of later tickets. Each ticket replaces its names with a POST.
 const todo = () => toast('Not available yet.');
 const runBatch = todo, cancel = todo, cancelAll = todo, rerun = todo, move = todo, logon = todo, saveBatch = todo, openBatch = todo, removeBatch = todo;
+// Edits go to the server one at a time, in the order you make them.
+let edits = Promise.resolve();
+const sendEdit = (url, body) => edits = edits.then(() => post(url, body)).catch(e => { toast(e.message); return null; });
+function saveSettings(b) {
+  b.saving = (b.saving ?? 0) + 1;
+  sendEdit(`/api/batches/${b.id}/settings`, fromView(b.settings)).then(sb => { if (--b.saving) return; if (sb) upsert(sb); render(); });
+}
+function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
+async function browse(b, path) { // the folder dialog: the server lists the folders
+  try { openDialog({ kind: 'folder', b, ...await post('/api/folders', { path }) }); } catch { if (path) browse(b, null); else toast('The folder list is not available.'); }
+}
 const scriptText = () => null; // the file text comes with the Files tab
 function renderSource(lines, hl) {
   if (!lines) return '<p class="muted" style="padding:0 12px">The file is not on disk.</p>';
@@ -457,6 +474,7 @@ function renderSettings(b) {
   return `${lk ? '<div class="banner" style="margin-bottom:10px">The run locks the settings.</div>' : ''}
   <div class="form">
     <h3>Scripts</h3>${txt('folder', 'Folder')}${abs ? '<div class="hint">⚠ Not portable: an absolute folder.</div>' : ''}
+    <span></span><div><button data-cmd="browse" ${dis}>Browse…</button></div>
     ${txt('filters', 'File filters')}<div class="hint">Separate filters with ;. Only * and ? are wildcards.</div>
     ${chk('recurse', 'Search subfolders')}
     <h3>Run</h3><label for="set-parallelLimit">Parallel limit</label><input type="number" min="1" max="64" id="set-parallelLimit" data-set="parallelLimit" data-k="set:parallelLimit" value="${esc(s.parallelLimit)}" ${dis}>
@@ -552,6 +570,10 @@ function renderDialog() {
     saveAs: () => `<h2 id="dlg-t">Save as</h2><label>File name <input type="text" id="dlg-in" value="${esc(d.b.name)}.sqlrunboard.json"></label>
       <p class="muted" style="font-size:12px">The batch name is the file name without .sqlrunboard.json.</p>
       <div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Save</button></div>`,
+    folder: () => `<h2 id="dlg-t">Select a folder</h2><p class="tnum">${esc(d.path)}</p>
+      <div role="group" aria-label="Folders" style="max-height:50vh;overflow:auto;display:flex;flex-direction:column;align-items:flex-start">
+        ${d.parent ? `<button data-folder="${esc(d.parent)}">⬑ ..</button>` : ''}${d.folders.map(f => `<button data-folder="${esc(f.path)}">${esc(f.name)}</button>`).join('')}</div>
+      <div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Select this folder</button></div>`,
     closeRun: () => `<h2 id="dlg-t">Close SQLRunboard?</h2><p>${esc(d.text)}</p><div class="btns"><button data-dlg="cancel">Keep open</button><button class="primary" data-dlg="ok">Cancel all and close</button></div>`,
   }[d.kind]();
   el.innerHTML = `<div class="ov"><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-t">${body}</div></div>`;
@@ -560,6 +582,7 @@ function renderDialog() {
 function dialogOk() {
   const d = app.dialog, v = document.getElementById('dlg-in')?.value ?? '';
   if (d.kind === 'password') { if (!v) return; d.b.password = v; app.dialog = null; renderDialog(); logon(d.b, d.then); return; }
+  if (d.kind === 'folder') { d.b.settings.folder = d.path; saveSettings(d.b); closeDialog(); return; }
   if (d.kind === 'confirm') { app.dialog = null; renderDialog(); d.then(); render(); return; }
   if (d.kind === 'saveAs') {
     if (!v.trim()) return;
@@ -611,6 +634,7 @@ function cmd(c, el) {
     case 'closeDrawer': b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel)}"]`)?.focus();
     case 'runlog': return todo();
     case 'test': return logon(b, login => { b.testMsg = `Connected. Server ${b.settings.server.split('.')[0].toUpperCase()}, database ${b.settings.database}, login ${login}.`; });
+    case 'browse': return browse(b, b.settings.folder);
     case 'sortFiles': b.scripts.sort((x, y) => x.path.localeCompare(y.path, undefined, { numeric: true, sensitivity: 'base' })); b.dirty = true; return render();
   }
 }
@@ -620,6 +644,7 @@ document.addEventListener('click', e => {
   if (app.menu && !e.target.closest('#menu')) closeMenu(false);
   const t = e.target, b = cur();
   const dlg = t.closest('[data-dlg]'); if (dlg) { e.preventDefault(); return dlg.dataset.dlg === 'ok' ? dialogOk() : closeDialog(); }
+  const fo = t.closest('[data-folder]'); if (fo) return browse(app.dialog.b, fo.dataset.folder);
   const mc = t.closest('[data-mcmd]');
   if (mc) {
     const { b: mb, path } = app.menu, c = mc.dataset.mcmd; closeMenu();
@@ -651,11 +676,12 @@ document.addEventListener('change', e => {
   if (t.id === 'theme') { app.theme = t.checked ? 'Dark' : 'Light'; store.set('theme', app.theme); return applyTheme(); }
   if (t.dataset.tl) { app[t.dataset.tl] = t.checked; store.set(t.dataset.tl, t.checked); return render(); }
   if (!b) return;
-  if (t.dataset.include) { b.scripts.find(s => s.path === t.dataset.include).include = t.checked; b.dirty = true; return render(); }
+  if (t.dataset.include) return setInclude(b, b.scripts.find(s => s.path === t.dataset.include), t.checked);
   if (t.dataset.set) {
     const k = t.dataset.set; let v = t.type === 'checkbox' ? t.checked : t.value;
     if (k === 'parallelLimit') { v = Math.min(64, Math.max(1, Math.round(+v || 1))); t.value = v; }
-    b.settings[k] = v; b.dirty = true; b.testMsg = null;
+    if (k === 'timeoutSeconds' && v !== '') { v = Math.max(1, Math.round(+v) || 1); t.value = v; }
+    b.settings[k] = v; b.dirty = true; b.testMsg = null; saveSettings(b);
     render({ tick: k !== 'auth' }); // the logon type changes which fields show
   }
 });
@@ -705,7 +731,7 @@ document.addEventListener('keydown', e => {
     const list = b.scripts.map(s => s.path), i = list.indexOf(fr.dataset.file);
     if (e.altKey && dirs[e.key]) { e.preventDefault(); if (!locked(b) && moveIn(b.scripts, b.scripts[i], dirs[e.key])) b.dirty = true; render(); }
     else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); b.fileSel = list[Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; render(); }
-    else if (e.key === ' ' && !locked(b) && b.scripts[i].state !== 'Missing') { e.preventDefault(); b.scripts[i].include = !b.scripts[i].include; b.dirty = true; render(); }
+    else if (e.key === ' ' && !locked(b) && b.scripts[i].state !== 'Missing') { e.preventDefault(); setInclude(b, b.scripts[i], !b.scripts[i].include); }
     else return;
     return document.querySelector(`[data-k="f:${CSS.escape(b.fileSel)}"]`)?.focus();
   }

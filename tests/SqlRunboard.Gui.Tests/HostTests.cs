@@ -58,4 +58,20 @@ public class HostTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync(path, Ct)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await withBadCookie.GetAsync(path, Ct)).StatusCode);
     }
+
+    [Theory]
+    [InlineData("""{"parallelLimit":1,"timeoutSeconds":1,"filters":"*.sql","target":{}}""", HttpStatusCode.OK)]
+    [InlineData("""{"parallelLimit":64,"filters":"*.sql","target":{}}""", HttpStatusCode.OK)]
+    [InlineData("""{"parallelLimit":0,"filters":"*.sql","target":{}}""", HttpStatusCode.BadRequest)]
+    [InlineData("""{"parallelLimit":65,"filters":"*.sql","target":{}}""", HttpStatusCode.BadRequest)]
+    [InlineData("""{"parallelLimit":4,"timeoutSeconds":0,"filters":"*.sql","target":{}}""", HttpStatusCode.BadRequest)]
+    public async Task The_server_checks_the_settings_range(string json, HttpStatusCode expected)
+    {
+        await using var app = await TestApp.StartAsync();
+        var batch = app.Host.Batches.NewBatch();
+
+        var res = await app.Client().PostAsync($"/api/batches/{batch.Id}/settings", new StringContent(json, System.Text.Encoding.UTF8, "application/json"), Ct);
+
+        Assert.Equal(expected, res.StatusCode);
+    }
 }

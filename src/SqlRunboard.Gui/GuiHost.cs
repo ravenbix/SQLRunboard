@@ -19,6 +19,9 @@ namespace SqlRunboard.Gui;
 /// <param name="AppDataFolder">Settings, lock file and logs of unsaved batches. Created if missing.</param>
 public sealed record GuiHostOptions(string AppDataFolder, ISqlExecutor Executor, TimeProvider Time);
 
+public sealed record IncludeRequest(string Path, bool Include);
+public sealed record FolderRequest(string? Path);
+
 /// <summary>The local web server: Kestrel on 127.0.0.1, a random port, a random token. See docs/SPEC.md "GUI host".</summary>
 public sealed class GuiHost : IAsyncDisposable
 {
@@ -61,6 +64,20 @@ public sealed class GuiHost : IAsyncDisposable
         // Server to page: SSE. Page to server: POST with a JSON body, one route per command.
         app.MapGet("/events", (BatchList list, CancellationToken ct) => TypedResults.ServerSentEvents(Events(list, ct)));
         app.MapPost("/api/batches", (BatchList list) => list.NewBatch());
+        app.MapPost("/api/batches/{id:int}/settings", (int id, BatchSettings settings, BatchList list) =>
+            settings is not { ParallelLimit: >= 1 and <= 64, TimeoutSeconds: null or >= 1, Filters: not null, Target: not null } ? Results.BadRequest()
+            : list.UpdateSettings(id, settings) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/include", (int id, IncludeRequest r, BatchList list) =>
+            list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());
+        // The browser has no folder picker that gives a path, so the page browses the folders here.
+        app.MapPost("/api/folders", (FolderRequest r) =>
+        {
+            var path = string.IsNullOrWhiteSpace(r.Path) ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : Path.GetFullPath(r.Path);
+            if (!Directory.Exists(path)) return Results.NotFound();
+            var folders = Directory.EnumerateDirectories(path, "*", new EnumerationOptions { IgnoreInaccessible = true })
+                .Order(FileScan.NaturalOrder).Select(d => new { name = Path.GetFileName(d), path = d });
+            return Results.Ok(new { path, parent = Path.GetDirectoryName(path), folders });
+        });
 
         await app.StartAsync();
         var host = new GuiHost(app, new Uri(app.Urls.First()), token, Path.Combine(options.AppDataFolder, LockFileName));

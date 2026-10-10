@@ -21,6 +21,7 @@ public sealed record GuiHostOptions(string AppDataFolder, ISqlExecutor Executor,
 
 public sealed record IncludeRequest(string Path, bool Include);
 public sealed record FolderRequest(string? Path);
+public sealed record LogonRequest(string? Password);
 public sealed record ScriptRequest(string Path);
 
 /// <summary>The local web server: Kestrel on 127.0.0.1, a random port, a random token. See docs/SPEC.md "GUI host".</summary>
@@ -70,6 +71,8 @@ public sealed class GuiHost : IAsyncDisposable
             : list.UpdateSettings(id, settings) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/include", (int id, IncludeRequest r, BatchList list) =>
             list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/logon", async (int id, LogonRequest r, BatchList list, CancellationToken ct) =>
+            await list.LogonAsync(id, r.Password, ct) is { } logon ? Results.Ok(logon) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/run", (int id, BatchList list) =>
             list.Run(id) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/cancel", (int id, ScriptRequest r, BatchList list) =>

@@ -3,6 +3,7 @@ using System.Net.ServerSentEvents;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -25,10 +26,13 @@ public sealed record FolderRequest(string? Path);
 public sealed class GuiHost : IAsyncDisposable
 {
     public const string CookieName = "sqlrunboard";
+    /// <summary>In the app data folder. JSON <c>{"url","token"}</c>. Shared by sqlrunboard and sqlrunboard-desktop.</summary>
+    public const string LockFileName = "sqlrunboard.lock";
 
     readonly WebApplication app;
+    readonly string lockPath;
 
-    GuiHost(WebApplication app, Uri baseUrl, string token) { this.app = app; BaseUrl = baseUrl; Token = token; }
+    GuiHost(WebApplication app, Uri baseUrl, string token, string lockPath) { this.app = app; BaseUrl = baseUrl; Token = token; this.lockPath = lockPath; }
 
     public Uri BaseUrl { get; }
     public string Token { get; }
@@ -42,6 +46,7 @@ public sealed class GuiHost : IAsyncDisposable
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseKestrel(k => k.Listen(IPAddress.Loopback, 0));
+        builder.Configuration["AllowedHosts"] = "127.0.0.1;localhost"; // the built-in host filtering answers 400 to other hosts
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(options.Executor);
@@ -50,6 +55,7 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
         var app = builder.Build();
+        app.Use(RejectForeignRequests);
         app.Use(RequireToken(token));
         var files = new EmbeddedFileProvider(typeof(GuiHost).Assembly, "SqlRunboard.Gui.wwwroot");
         app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
@@ -74,7 +80,40 @@ public sealed class GuiHost : IAsyncDisposable
         });
 
         await app.StartAsync();
-        return new GuiHost(app, new Uri(app.Urls.First()), token);
+        var host = new GuiHost(app, new Uri(app.Urls.First()), token, Path.Combine(options.AppDataFolder, LockFileName));
+        host.WriteLock();
+        return host;
+    }
+
+    record LockFile(Uri Url, string Token);
+
+    /// <summary>The start URL of the server in the lock file, or null when no server answers there with that token (a stale or missing lock file).</summary>
+    public static async Task<Uri?> FindRunningAsync(string appDataFolder)
+    {
+        try
+        {
+            var path = Path.Combine(appDataFolder, LockFileName);
+            if (!File.Exists(path)) return null;
+            if (JsonSerializer.Deserialize<LockFile>(File.ReadAllText(path), JsonSerializerOptions.Web) is not { Url: { } url, Token: { } token }) return null;
+            var startUrl = new Uri(url, "/?token=" + Uri.EscapeDataString(token));
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(3) };
+            using var res = await http.GetAsync(startUrl);
+            return res.StatusCode == HttpStatusCode.Redirect ? startUrl : null; // only our server with this token redirects
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or IOException or UriFormatException)
+        {
+            return null;
+        }
+    }
+
+    // ponytail: check-then-write, so two starts in the same instant can both run. Add an OS file lock if that matters.
+    void WriteLock()
+    {
+        File.Delete(lockPath); // a stale file can have other permissions; create it new with mode 600
+        var fs = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows()) fs.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using var stream = new FileStream(lockPath, fs);
+        JsonSerializer.Serialize(stream, new LockFile(BaseUrl, Token), JsonSerializerOptions.Web);
     }
 
     static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, [EnumeratorCancellation] CancellationToken ct)
@@ -86,6 +125,27 @@ public sealed class GuiHost : IAsyncDisposable
     }
 
     public BatchList Batches => app.Services.GetRequiredService<BatchList>();
+
+    /// <summary>
+    /// Other web sites must not use the server: reject an <c>Origin</c> other than our own, and a <c>POST</c> that is not
+    /// <c>application/json</c> (a form or <c>text/plain</c> POST is a "simple" cross-site request with no CORS preflight).
+    /// </summary>
+    static async Task RejectForeignRequests(HttpContext ctx, RequestDelegate next)
+    {
+        var origin = ctx.Request.Headers.Origin;
+        if (origin.Count > 0 && origin != $"{ctx.Request.Scheme}://{ctx.Request.Host}")
+        {
+            ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        if (HttpMethods.IsPost(ctx.Request.Method)
+            && !string.Equals(ctx.Request.GetTypedHeaders().ContentType?.MediaType.Value, "application/json", StringComparison.OrdinalIgnoreCase))
+        {
+            ctx.Response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
+            return;
+        }
+        await next(ctx);
+    }
 
     /// <summary>The token in the query string becomes a cookie, then a redirect drops it from the URL. All other requests need the cookie.</summary>
     static Func<HttpContext, RequestDelegate, Task> RequireToken(string token)

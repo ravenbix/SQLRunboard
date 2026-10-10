@@ -36,6 +36,30 @@ public class ExecutableTests
     }
 
     [Fact]
+    public async Task A_second_start_opens_the_running_server_and_stops()
+    {
+        await using var app = await TestApp.StartAsync();
+        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
+        {
+            ArgumentList = { Path.Combine(AppContext.BaseDirectory, "sqlrunboard.dll"), "--app-data", app.AppData, "--no-browser" },
+            RedirectStandardOutput = true,
+        };
+        using var exe = Process.Start(psi)!;
+        try
+        {
+            var output = await exe.StandardOutput.ReadToEndAsync(Ct).WaitAsync(TimeSpan.FromSeconds(30), Ct);
+            await exe.WaitForExitAsync(Ct);
+
+            Assert.Equal(0, exe.ExitCode);
+            Assert.Equal($"SQLRunboard: {app.Host.StartUrl}", output.Trim());
+        }
+        finally
+        {
+            if (!exe.HasExited) exe.Kill(entireProcessTree: true);
+        }
+    }
+
+    [Fact]
     public async Task An_unknown_argument_prints_the_usage_and_exits_with_code_2()
     {
         var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")

@@ -1,6 +1,9 @@
 using System.Net;
+using System.Net.ServerSentEvents;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -40,6 +43,8 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(options.Executor);
         builder.Services.AddSingleton(options.Time);
+        builder.Services.AddSingleton<BatchList>();
+        builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
         var app = builder.Build();
         app.Use(RequireToken(token));
@@ -47,9 +52,23 @@ public sealed class GuiHost : IAsyncDisposable
         app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
         app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
 
+        // Server to page: SSE. Page to server: POST with a JSON body, one route per command.
+        app.MapGet("/events", (BatchList list, CancellationToken ct) => TypedResults.ServerSentEvents(Events(list, ct)));
+        app.MapPost("/api/batches", (BatchList list) => list.NewBatch());
+
         await app.StartAsync();
         return new GuiHost(app, new Uri(app.Urls.First()), token);
     }
+
+    static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, [EnumeratorCancellation] CancellationToken ct)
+    {
+        using var sub = list.Subscribe();
+        yield return new SseItem<object>(new { batches = sub.Snapshot }, "snapshot");
+        await foreach (var change in sub.Changes.ReadAllAsync(ct))
+            yield return new SseItem<object>(change.Data, change.Kind);
+    }
+
+    public BatchList Batches => app.Services.GetRequiredService<BatchList>();
 
     /// <summary>The token in the query string becomes a cookie, then a redirect drops it from the URL. All other requests need the cookie.</summary>
     static Func<HttpContext, RequestDelegate, Task> RequireToken(string token)

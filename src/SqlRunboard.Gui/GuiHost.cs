@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.ServerSentEvents;
 using System.Runtime.CompilerServices;
@@ -18,10 +19,15 @@ using SqlRunboard.Core;
 namespace SqlRunboard.Gui;
 
 /// <param name="AppDataFolder">Settings, lock file and logs of unsaved batches. Created if missing.</param>
-public sealed record GuiHostOptions(string AppDataFolder, ISqlExecutor Executor, TimeProvider Time);
+/// <param name="OpenFolder">Shows a folder in the OS file manager. Null: the OS default (tests pass a recorder).</param>
+public sealed record GuiHostOptions(string AppDataFolder, ISqlExecutor Executor, TimeProvider Time, Action<string>? OpenFolder = null);
 
 public sealed record IncludeRequest(string Path, bool Include);
-public sealed record FolderRequest(string? Path);
+/// <param name="Files">A file filter such as <c>*.sqlrunboard.json</c>: the answer then also lists those files. Null: folders only.</param>
+public sealed record FolderRequest(string? Path, string? Files = null);
+public sealed record PathRequest(string Path);
+/// <param name="Path">Null: Save to the current file. Otherwise Save as.</param>
+public sealed record SaveRequest(string? Path, bool Overwrite);
 public sealed record ScriptRequest(string Path);
 
 /// <summary>The local web server: Kestrel on 127.0.0.1, a random port, a random token. See docs/SPEC.md "GUI host".</summary>
@@ -53,7 +59,7 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(options.Executor);
         builder.Services.AddSingleton(options.Time);
-        builder.Services.AddSingleton<BatchList>();
+        builder.Services.AddSingleton(new BatchList(options.Executor, options.Time, options.AppDataFolder));
         builder.Services.AddSingleton<AppSettings>();
         builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
@@ -74,7 +80,7 @@ public sealed class GuiHost : IAsyncDisposable
         });
         app.MapPost("/api/batches", (BatchList list) => list.NewBatch());
         app.MapPost("/api/batches/{id:int}/settings", (int id, BatchSettings settings, BatchList list) =>
-            settings is not { ParallelLimit: >= 1 and <= 64, TimeoutSeconds: null or >= 1, Filters: not null, Target: not null } ? Results.BadRequest()
+            !settings.IsValid ? Results.BadRequest()
             : list.UpdateSettings(id, settings) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/include", (int id, IncludeRequest r, BatchList list) =>
             list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());
@@ -84,20 +90,46 @@ public sealed class GuiHost : IAsyncDisposable
             list.Cancel(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/cancel-all", (int id, BatchList list) =>
             list.CancelAll(id) is { } b ? Results.Ok(b) : Results.NotFound());
-        // The browser has no folder picker that gives a path, so the page browses the folders here.
+        app.MapPost("/api/batches/{id:int}/rerun", (int id, ScriptRequest r, BatchList list) =>
+            list.Rerun(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/rerun-failed", (int id, BatchList list) =>
+            list.RerunFailed(id) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/open", (PathRequest r, BatchList list) => FileResult(() => list.Open(r.Path)));
+        app.MapPost("/api/batches/{id:int}/save", (int id, SaveRequest r, BatchList list) => FileResult(() => list.Save(id, r.Path, r.Overwrite)));
+        app.MapPost("/api/batches/{id:int}/reload", (int id, BatchList list) => FileResult(() => list.Reload(id)));
+        app.MapPost("/api/batches/{id:int}/remove", (int id, BatchList list) => list.Remove(id) ? Results.Ok(new { }) : Results.NotFound());
+        app.MapPost("/api/app-data/open", (GuiHostOptions o) =>
+        {
+            // UseShellExecute on a folder opens the file manager: Explorer, Finder or xdg-open.
+            (o.OpenFolder ?? (f => Process.Start(new ProcessStartInfo(f) { UseShellExecute = true })))(o.AppDataFolder);
+            return Results.Ok(new { });
+        });
+        // The browser has no folder or file picker that gives a path, so the page browses the folders here.
         app.MapPost("/api/folders", (FolderRequest r) =>
         {
             var path = string.IsNullOrWhiteSpace(r.Path) ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : Path.GetFullPath(r.Path);
+            if (File.Exists(path)) path = Path.GetDirectoryName(path)!; // a batch file: start in its folder
             if (!Directory.Exists(path)) return Results.NotFound();
-            var folders = Directory.EnumerateDirectories(path, "*", new EnumerationOptions { IgnoreInaccessible = true })
-                .Order(FileScan.NaturalOrder).Select(d => new { name = Path.GetFileName(d), path = d });
-            return Results.Ok(new { path, parent = Path.GetDirectoryName(path), folders });
+            var options = new EnumerationOptions { IgnoreInaccessible = true, MatchType = MatchType.Simple };
+            var folders = Directory.EnumerateDirectories(path, "*", options).Order(FileScan.NaturalOrder).Select(d => new { name = Path.GetFileName(d), path = d });
+            var files = r.Files is null ? [] : Directory.EnumerateFiles(path, r.Files, options).Order(FileScan.NaturalOrder).Select(f => new { name = Path.GetFileName(f), path = f });
+            return Results.Ok(new { path, parent = Path.GetDirectoryName(path), folders, files });
         });
 
         await app.StartAsync();
         var host = new GuiHost(app, new Uri(app.Urls.First()), token, Path.Combine(options.AppDataFolder, LockFileName));
         host.WriteLock();
         return host;
+    }
+
+    /// <summary>A batch file command: the batch, or a problem whose detail the page shows. 409: the file changed on disk.</summary>
+    static IResult FileResult(Func<Batch?> command)
+    {
+        try { return command() is { } b ? Results.Ok(b) : Results.NotFound(); }
+        catch (BatchFileChangedException e) { return Results.Problem(e.Message, statusCode: StatusCodes.Status409Conflict); }
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status404NotFound); }
+        catch (Exception e) when (e is ArgumentException or InvalidDataException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status400BadRequest); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status500InternalServerError); }
     }
 
     record LockFile(Uri Url, string Token);

@@ -217,7 +217,7 @@ function toRun(r) {
   const t0 = Date.parse(r.start), sec = x => x == null ? null : (Date.parse(x) - t0) / 1000, skew = Date.parse(r.now) - Date.now(), rs = {};
   for (const s of r.scripts) rs[s.path] = { status: s.status, error: s.error, msgs: [], attempts: s.attempts.map((a, i) => ({ n: i + 1, start: sec(a.start), end: sec(a.end), status: a.status, rows: a.rows, error: a.error })) };
   const ended = !r.scripts.some(s => s.status === 'Queued' || s.status === 'Running');
-  return { rs, queue: r.queue, wall: new Date(t0), live: true, ended, endAt: ended ? Math.max(0, ...Object.values(rs).flatMap(x => x.attempts.map(a => a.end ?? 0))) : null, get t() { return (Date.now() + skew - t0) / 1000; } };
+  return { rs, queue: r.queue, wall: new Date(t0), live: true, ended, stale: r.ended, endAt: ended ? Math.max(0, ...Object.values(rs).flatMap(x => x.attempts.map(a => a.end ?? 0))) : null, get t() { return (Date.now() + skew - t0) / 1000; } };
 }
 const fromView = s => ({ folder: s.folder || null, filters: s.filters, recurse: s.recurse, parallelLimit: +s.parallelLimit, stopOnFirstFailure: s.stopOnFirstFailure, confirmBeforeRun: s.confirmBeforeRun,
   timeoutSeconds: s.timeoutSeconds === '' ? null : +s.timeoutSeconds,
@@ -232,7 +232,9 @@ function upsert(sb) {
 }
 async function post(url, body = {}) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  if (!res.ok) { // a problem response has a detail text for the user
+    const e = new Error((await res.json().catch(() => null))?.detail ?? `${url}: HTTP ${res.status}`); e.status = res.status; throw e;
+  }
   return res.json();
 }
 // SSE: the full state first ("snapshot"), then one event per change. EventSource sends the auth cookie and reconnects by itself.
@@ -248,6 +250,8 @@ function connect() {
     render();
   });
   es.addEventListener('batch', e => { upsert(JSON.parse(e.data)); render(); });
+  es.addEventListener('remove', e => dropBatch(JSON.parse(e.data).id));
+  es.addEventListener('warning', e => { const w = JSON.parse(e.data); toast(`${app.batches.find(b => b.id === w.id)?.name ?? 'Batch'}: ${w.text}`); });
   es.onerror = () => { delete document.documentElement.dataset.connected; };
 }
 
@@ -263,13 +267,15 @@ function moveIn(arr, item, dir) {
 }
 const canMove = (b, path) => b.run ? !b.run.ended && b.run.rs[path]?.status === 'Queued' : !locked(b) && !!b.scripts.find(x => x.path === path);
 const locked = b => !!b.signing || !!(b.run && b.run.live && !b.run.ended);
+const canRerun = (b, r) => DONE.includes(r.status) && !b.signing && !b.run.stale; // stale: the settings changed, so the run ended
 
 // ponytail: stand-ins for the commands of later tickets. Each ticket replaces its names with a POST.
 const todo = () => toast('Not available yet.');
-const rerun = todo, move = todo, logon = todo, saveBatch = todo, openBatch = todo, removeBatch = todo;
-// Edits go to the server one at a time, in the order you make them.
+const move = todo, logon = todo;
+// Edits go to the server one at a time, in the order you make them. queued() gives the error to the caller; sendEdit() shows it.
 let edits = Promise.resolve();
-const sendEdit = (url, body) => edits = edits.then(() => post(url, body)).catch(e => { toast(e.message); return null; });
+function queued(url, body) { const p = edits.then(() => post(url, body)); edits = p.catch(() => null); return p; }
+const sendEdit = (url, body) => queued(url, body).catch(e => { toast(e.message); return null; });
 function saveSettings(b) {
   b.saving = (b.saving ?? 0) + 1;
   sendEdit(`/api/batches/${b.id}/settings`, fromView(b.settings)).then(sb => { if (--b.saving) return; if (sb) upsert(sb); render(); });
@@ -281,9 +287,36 @@ async function runBatch(b) {
 }
 const cancel = (b, path) => sendEdit(`/api/batches/${b.id}/cancel`, { path });
 const cancelAll = b => sendEdit(`/api/batches/${b.id}/cancel-all`, {});
+const rerun = (b, path) => sendEdit(`/api/batches/${b.id}/rerun`, { path });
+const rerunFailed = b => sendEdit(`/api/batches/${b.id}/rerun-failed`, {});
 function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
-async function browse(b, path) { // the folder dialog: the server lists the folders
-  try { openDialog({ kind: 'folder', b, ...await post('/api/folders', { path }) }); } catch { if (path) browse(b, null); else toast('The folder list is not available.'); }
+// The folder, Open and Save as dialogs: the server lists the folders (and the batch files). kind: folder, open or saveAs.
+async function browse(b, path, kind = 'folder') {
+  const name = app.dialog?.kind === kind ? document.getElementById('dlg-in')?.value : undefined; // keep the typed file name
+  try { openDialog({ kind, b, name, ...await post('/api/folders', { path, files: kind === 'folder' ? null : '*' + EXT }) }); }
+  catch { if (path) browse(b, null, kind); else toast('The folder list is not available.'); }
+}
+// Batch files. The server reads and writes them; the page sends full paths.
+const EXT = '.sqlrunboard.json';
+const isAbs = p => /^([a-zA-Z]:[\\/]|[\\/])/.test(p ?? '');
+const join = (dir, p) => isAbs(p) ? p : dir.replace(/[\\/]$/, '') + (dir.includes('\\') ? '\\' : '/') + p;
+function saveBatch(b, path = null, overwrite = false) { // Ctrl+S; an unsaved batch does Save as
+  if (!b.file && !path) return saveAs(b);
+  queued(`/api/batches/${b.id}/save`, { path, overwrite }).then(sb => { upsert(sb); render(); announce(`Saved ${sb.name}.`); },
+    e => e.status === 409 ? openDialog({ kind: 'changed', b, path }) : toast(e.message));
+}
+const saveAs = b => b && !b.missing && browse(b, b.file ?? (isAbs(b.settings.folder) ? b.settings.folder : null), 'saveAs');
+const openBatch = () => browse(cur(), cur()?.file ?? null, 'open');
+async function openFile(path) { // the server gives the existing entry if the file is already in the list
+  try { const b = upsert(await post('/api/batches/open', { path })); app.cur = b.id; closeDialog(); } catch (e) { toast(e.message); }
+}
+function reloadBatch(b) { queued(`/api/batches/${b.id}/reload`).then(sb => { upsert(sb); render(); announce(`Loaded ${sb.name} again.`); }, e => toast(e.message)); }
+function removeBatch(b) { if (b) sendEdit(`/api/batches/${b.id}/remove`).then(r => r && dropBatch(b.id)); } // the file stays on disk
+function dropBatch(id) {
+  const i = app.batches.findIndex(b => b.id === id); if (i < 0) return;
+  app.batches.splice(i, 1);
+  if (app.cur === id) app.cur = (app.batches[i] ?? app.batches[i - 1])?.id ?? null;
+  render();
 }
 const scriptText = () => null; // the file text comes with the Files tab
 function renderSource(lines, hl) {
@@ -378,7 +411,7 @@ function renderHeader(b) {
     ${b.signing ? `<span>${esc(b.signing.text)}</span><button data-cmd="cancelSignIn">Cancel</button>`
       : `<button class="primary" data-cmd="run" title="F5" ${live ? 'disabled' : ''}>Run</button>`}
     <button data-cmd="cancelAll" title="Shift+F5" ${live ? '' : 'disabled'}>Cancel all</button>
-    <button data-cmd="rerunFailed" ${bad && !b.signing ? '' : 'disabled'}>Rerun all failed</button>
+    <button data-cmd="rerunFailed" ${bad && !b.signing && !run.stale ? '' : 'disabled'}>Rerun all failed</button>
     <span>${run ? `${c.Succeeded + bad} of ${n} done${bad ? `, ${bad} failed` : ''}${run.ended ? ' · Run ended' : ''}` : 'Not run yet'}</span>
     <div class="prog" aria-hidden="true">${seg('Succeeded', c.Succeeded)}${seg('Failed', bad)}${seg('Running', c.Running)}</div>
     ${b.logonMsg ? `<div class="banner err" role="alert">${esc(b.logonMsg)}</div>` : ''}`;
@@ -393,6 +426,7 @@ function renderRun(b) {
   if (app.view === 'timeline') head += `<label><input type="checkbox" data-tl="tlColumns" ${app.tlColumns ? 'checked' : ''}> Columns</label><label><input type="checkbox" data-tl="tlCollapse" ${app.tlCollapse ? 'checked' : ''}> Collapse idle gaps</label>`;
   head += '</div>';
   if (run?.restored && !run.live) head += `<p class="note">Last run, from <span class="tnum">logs/${esc(b.name)}_${stamp(run.wall)}/summary.csv</span>.${run.unfinished ? ` Interrupted: the app stopped at or after ${clock(run, run.newest)}.` : ''} Rerun opens this run again. Run starts a new run.</p>`;
+  if (run?.stale) head += '<p class="note">The settings changed. Run the batch again.</p>';
   if (!run) head += '<p class="note">No run yet. These scripts are Queued in the start order. Move them here or in the Files tab.</p>';
   return head + (app.view === 'board' ? renderBoard(b) : app.view === 'table' ? renderTable(b) : renderTimeline(b));
 }
@@ -521,7 +555,7 @@ function renderDrawer(b) {
   }
   return `<div class="dh"><div class="t">${bubble(r.status)}<span>${esc(x.path)}</span></div>
     <button data-cmd="dCancel" ${live && (r.status === 'Queued' || (r.status === 'Running' && a.rollback == null)) ? '' : 'disabled'}>Cancel</button>
-    <button data-cmd="dRerun" ${DONE.includes(r.status) && !b.signing ? '' : 'disabled'}>Rerun</button>
+    <button data-cmd="dRerun" ${canRerun(b, r) ? '' : 'disabled'}>Rerun</button>
     ${['top', 'up', 'down', 'bottom'].map(d => `<button data-dmove="${d}" aria-label="${{ top: 'Move to top', up: 'Move up', down: 'Move down', bottom: 'Move to bottom' }[d]}" title="${{ top: 'Move to top (Alt+Home)', up: 'Move up (Alt+↑)', down: 'Move down (Alt+↓)', bottom: 'Move to bottom (Alt+End)' }[d]}" ${mv ? '' : 'disabled'}>${{ top: '⤒', up: '↑', down: '↓', bottom: '⤓' }[d]}</button>`).join('')}
     <button data-cmd="closeDrawer" aria-label="Close drawer" title="Esc">✕</button>
     <div class="seg" role="group" aria-label="Drawer view" style="flex-basis:100%"><button data-dview="messages" aria-pressed="${b.dview !== 'script'}">Messages</button><button data-dview="script" aria-pressed="${b.dview === 'script'}">Script</button></div></div>
@@ -591,9 +625,14 @@ function renderDialog() {
     confirm: () => `<h2 id="dlg-t">Run ${esc(d.b.name)}?</h2><p>The target is protected. Check it before the run.</p>
       <dl><dt>Server</dt><dd class="tnum">${esc(s.server)}</dd><dt>Database</dt><dd class="tnum">${esc(s.database)}</dd><dt>Login</dt><dd class="tnum">${esc(d.login)}</dd><dt>Scripts</dt><dd>${d.n}</dd></dl>
       <div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Run</button></div>`,
-    saveAs: () => `<h2 id="dlg-t">Save as</h2><label>File name <input type="text" id="dlg-in" value="${esc(d.b.name)}.sqlrunboard.json"></label>
-      <p class="muted" style="font-size:12px">The batch name is the file name without .sqlrunboard.json.</p>
-      <div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Save</button></div>`,
+    saveAs: () => `<h2 id="dlg-t">Save as</h2><label>File name <input type="text" id="dlg-in" value="${esc(d.name ?? d.b.name + EXT)}"></label>
+      <p class="muted" style="font-size:12px">The batch name is the file name without ${EXT}. The app adds ${EXT} if you do not type it.</p>
+      ${fileList(d)}<div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Save</button></div>`,
+    open: () => `<h2 id="dlg-t">Open a batch file</h2><label>Path <input type="text" id="dlg-in" value="${esc(d.path)}"></label>
+      <p class="muted" style="font-size:12px">Type or paste a path, or select a ${EXT} file.</p>
+      ${fileList(d)}<div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Open</button></div>`,
+    changed: () => `<h2 id="dlg-t">The file changed on disk</h2><p class="tnum">${esc(d.b.file)}</p><p>Another program changed the file after the app loaded it.</p>
+      <div class="btns"><button data-dlg="cancel">Cancel</button><button data-dlg="reload">Load again</button><button class="primary" data-dlg="ok">Overwrite</button></div>`,
     folder: () => `<h2 id="dlg-t">Select a folder</h2><p class="tnum">${esc(d.path)}</p>
       <div role="group" aria-label="Folders" style="max-height:50vh;overflow:auto;display:flex;flex-direction:column;align-items:flex-start">
         ${d.parent ? `<button data-folder="${esc(d.parent)}">⬑ ..</button>` : ''}${d.folders.map(f => `<button data-folder="${esc(f.path)}">${esc(f.name)}</button>`).join('')}</div>
@@ -603,16 +642,17 @@ function renderDialog() {
   el.innerHTML = `<div class="ov"><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-t">${body}</div></div>`;
   (el.querySelector('#dlg-in') ?? el.querySelector('.primary')).focus();
 }
+const fileList = d => `<p class="tnum">${esc(d.path)}</p><div role="group" aria-label="Folders and files" style="max-height:40vh;overflow:auto;display:flex;flex-direction:column;align-items:flex-start">
+  ${d.parent ? `<button data-folder="${esc(d.parent)}">⬑ ..</button>` : ''}${d.folders.map(f => `<button data-folder="${esc(f.path)}">${esc(f.name)}</button>`).join('')}
+  ${d.files.map(f => `<button class="tnum" data-pick="${esc(f.path)}">${esc(f.name)}</button>`).join('')}</div>`;
 function dialogOk() {
   const d = app.dialog, v = document.getElementById('dlg-in')?.value ?? '';
   if (d.kind === 'password') { if (!v) return; d.b.password = v; app.dialog = null; renderDialog(); logon(d.b, d.then); return; }
   if (d.kind === 'folder') { d.b.settings.folder = d.path; saveSettings(d.b); closeDialog(); return; }
   if (d.kind === 'confirm') { app.dialog = null; renderDialog(); d.then(); render(); return; }
-  if (d.kind === 'saveAs') {
-    if (!v.trim()) return;
-    const b = d.b; b.file = (b.file ? b.file.replace(/[^/]+$/, '') : '~/sql/') + v.trim();
-    b.name = v.trim().replace(/\.sqlrunboard\.json$|\.json$/i, ''); saveBatch(b); closeDialog(); return;
-  }
+  if (d.kind === 'saveAs') { if (!v.trim()) return; closeDialog(); saveBatch(d.b, join(d.path, v.trim())); return; }
+  if (d.kind === 'open') { if (!v.trim()) return; const p = join(d.path, v.trim()); return p.toLowerCase().endsWith(EXT) ? openFile(p) : browse(d.b, p, 'open'); }
+  if (d.kind === 'changed') { closeDialog(); saveBatch(d.b, d.path, true); return; }
   closeDialog();
 }
 function openMenu(b, path, x, y) {
@@ -625,7 +665,7 @@ function openMenu(b, path, x, y) {
   el.innerHTML = `<div class="m" role="menu" aria-label="${esc(path)}" style="left:${Math.min(x, innerWidth - 230)}px;top:${Math.min(y, innerHeight - 260)}px">
     ${it('open', 'Show messages', 'Enter', true)}
     ${it('cancel', 'Cancel', '', live && (r.status === 'Queued' || (r.status === 'Running' && lastA(r).rollback == null)))}
-    ${it('rerun', 'Rerun', '', DONE.includes(r.status) && !b.signing)}<hr>
+    ${it('rerun', 'Rerun', '', canRerun(b, r))}<hr>
     ${it('top', 'Move to top', 'Alt+Home', mv)}${it('up', 'Move up', 'Alt+↑', mv)}${it('down', 'Move down', 'Alt+↓', mv)}${it('bottom', 'Move to bottom', 'Alt+End', mv)}</div>`;
   el.querySelector('button:not(:disabled)')?.focus();
   render();
@@ -650,15 +690,15 @@ function cmd(c, el) {
     case 'new': return newBatch();
     case 'open': return openBatch();
     case 'save': return b && !b.missing && saveBatch(b);
-    case 'saveAs': return todo();
+    case 'saveAs': return saveAs(b);
     case 'remove': return removeBatch(b);
-    case 'appData': return todo();
+    case 'appData': return post('/api/app-data/open').catch(e => toast(e.message));
     case 'run': return runBatch(b);
     case 'cancelSignIn': b.signing = null; return render();
     case 'cancelAll': cancelAll(b); return render();
-    case 'rerunFailed': rerun(b, Object.entries(b.run.rs).filter(([, r]) => r.status === 'Failed' || r.status === 'Cancelled').map(([p]) => p)); return render();
+    case 'rerunFailed': rerunFailed(b); return render();
     case 'dCancel': cancel(b, b.sel); return render();
-    case 'dRerun': rerun(b, [b.sel]); return render();
+    case 'dRerun': rerun(b, b.sel); return render();
     case 'closeDrawer': b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel)}"]`)?.focus();
     case 'runlog': return todo();
     case 'test': return logon(b, login => { b.testMsg = `Connected. Server ${b.settings.server.split('.')[0].toUpperCase()}, database ${b.settings.database}, login ${login}.`; });
@@ -671,12 +711,15 @@ function cmd(c, el) {
 document.addEventListener('click', e => {
   if (app.menu && !e.target.closest('#menu')) closeMenu(false);
   const t = e.target, b = cur();
-  const dlg = t.closest('[data-dlg]'); if (dlg) { e.preventDefault(); return dlg.dataset.dlg === 'ok' ? dialogOk() : closeDialog(); }
-  const fo = t.closest('[data-folder]'); if (fo) return browse(app.dialog.b, fo.dataset.folder);
+  const dlg = t.closest('[data-dlg]');
+  if (dlg) { e.preventDefault(); const d = app.dialog; return dlg.dataset.dlg === 'ok' ? dialogOk() : (closeDialog(), dlg.dataset.dlg === 'reload' && reloadBatch(d.b)); }
+  const fo = t.closest('[data-folder]'); if (fo) return browse(app.dialog.b, fo.dataset.folder, app.dialog.kind);
+  const pk = t.closest('[data-pick]');
+  if (pk) { if (app.dialog.kind === 'open') return openFile(pk.dataset.pick); document.getElementById('dlg-in').value = pk.textContent; return; }
   const mc = t.closest('[data-mcmd]');
   if (mc) {
     const { b: mb, path } = app.menu, c = mc.dataset.mcmd; closeMenu();
-    if (c === 'open') selectScript(mb, path, true); else if (c === 'cancel') cancel(mb, path); else if (c === 'rerun') rerun(mb, [path]); else move(mb, path, c);
+    if (c === 'open') selectScript(mb, path, true); else if (c === 'cancel') cancel(mb, path); else if (c === 'rerun') rerun(mb, path); else move(mb, path, c);
     return render();
   }
   const c = t.closest('[data-cmd]'); if (c) { e.preventDefault(); return cmd(c.dataset.cmd, c); }

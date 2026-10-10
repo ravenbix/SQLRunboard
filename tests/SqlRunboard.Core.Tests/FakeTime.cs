@@ -8,6 +8,8 @@ public sealed class FakeTime(DateTimeOffset start) : TimeProvider
     public FakeTime() : this(new DateTimeOffset(2026, 10, 9, 12, 0, 0, TimeSpan.Zero)) { }
 
     public override DateTimeOffset GetUtcNow() { lock (gate) return now; }
+    /// <summary>A fixed +02:00 zone (no DST), so local times in the logs are the same on every computer.</summary>
+    public override TimeZoneInfo LocalTimeZone { get; } = TimeZoneInfo.CreateCustomTimeZone("FakeTime +02", TimeSpan.FromHours(2), "FakeTime +02", "FakeTime +02");
     public override long TimestampFrequency => TimeSpan.TicksPerSecond;
     public override long GetTimestamp() => GetUtcNow().UtcTicks;
 

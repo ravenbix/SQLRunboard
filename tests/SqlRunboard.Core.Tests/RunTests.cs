@@ -237,6 +237,115 @@ public sealed class RunTests : IDisposable
         Assert.DoesNotContain(executor.Calls, c => c.ScriptName == "d.sql");
     }
 
+    [Fact]
+    public async Task A_rerun_reads_the_file_again_goes_to_the_bottom_of_the_queue_and_adds_an_attempt()
+    {
+        var b = NewBatch(1, "a.sql", "b.sql", "c.sql");
+        Script("a.sql", 5, ScriptStatus.Failed); Script("b.sql", 5); Script("c.sql", 5);
+        list.Run(b.Id);
+        time.Advance(TimeSpan.FromSeconds(5));
+        await Until(b.Id, r => StatusOf(r, "b.sql") == ScriptStatus.Running);
+
+        Write("a.sql", "select 'fixed'");
+        Script("a.sql", 5);
+        var run = list.Rerun(b.Id, "a.sql")!.Run!;
+        Assert.Equal(["c.sql", "a.sql"], run.Queue);
+        Assert.Equal(ScriptStatus.Queued, StatusOf(run, "a.sql"));
+        Assert.Equal(["c.sql", "a.sql"], list.Rerun(b.Id, "b.sql")!.Run!.Queue); // a Running script does not rerun
+
+        time.Advance(TimeSpan.FromSeconds(5));
+        await Until(b.Id, r => StatusOf(r, "c.sql") == ScriptStatus.Running);
+        time.Advance(TimeSpan.FromSeconds(5));
+        await Until(b.Id, r => StatusOf(r, "a.sql") == ScriptStatus.Running);
+        time.Advance(TimeSpan.FromSeconds(5));
+        run = await Until(b.Id, r => !r.Active);
+
+        Assert.Equal([ScriptStatus.Failed, ScriptStatus.Succeeded], run.Scripts[0].Attempts.Select(a => a.Status));
+        Assert.Equal(["a.sql", "b.sql", "c.sql", "a.sql"], executor.Calls.Select(c => c.ScriptName));
+        Assert.Equal([new ScriptPart("select 'fixed'", 1, 1)], executor.Calls.Last().Parts);
+    }
+
+    [Fact]
+    public async Task Rerun_all_failed_opens_the_run_again_in_the_start_order_with_the_current_settings_and_ignores_the_check_boxes()
+    {
+        var b = NewBatch(4, "a.sql", "b.sql", "c.sql", "d.sql");
+        Script("a.sql", 5); Script("b.sql", 10, ScriptStatus.Failed); Script("c.sql", 5, ScriptStatus.Failed); Script("d.sql", 60);
+        list.Run(b.Id);
+        list.Cancel(b.Id, "d.sql");
+        time.Advance(TimeSpan.FromSeconds(10));
+        await Until(b.Id, r => !r.Active);
+        list.SetInclude(b.Id, "b.sql", false);
+        list.UpdateSettings(b.Id, b.Settings with { ParallelLimit = 1, StopOnFirstFailure = true });
+
+        var run = list.RerunFailed(b.Id)!.Run!;
+        Assert.True(run.Active);
+        Assert.Equal(ScriptStatus.Running, StatusOf(run, "b.sql"));
+        Assert.Equal(["c.sql", "d.sql"], run.Queue);
+
+        time.Advance(TimeSpan.FromSeconds(10)); // b fails again: the stop setting applies to reruns
+        run = await Until(b.Id, r => !r.Active && r.Scripts[1].Attempts.Count == 2);
+        Assert.Equal([1, 2, 1, 1], run.Scripts.Select(s => s.Attempts.Count));
+        Assert.Equal("Not started: the queue stopped", run.Scripts[2].Error);
+    }
+
+    [Theory]
+    [InlineData("server")]
+    [InlineData("database")]
+    [InlineData("auth")]
+    [InlineData("user")]
+    [InlineData("encrypt")]
+    [InlineData("extra")]
+    [InlineData("folder")]
+    [InlineData("filters")]
+    [InlineData("recurse")]
+    public async Task A_change_to_the_target_or_the_file_scan_ends_the_run_and_reruns_do_nothing(string change)
+    {
+        var b = NewBatch(4, "a.sql");
+        Script("a.sql", 5, ScriptStatus.Failed);
+        list.Run(b.Id);
+        time.Advance(TimeSpan.FromSeconds(5));
+        await Until(b.Id, r => !r.Active);
+        var s = b.Settings with { ParallelLimit = 2, StopOnFirstFailure = true, TimeoutSeconds = 9, ConfirmBeforeRun = true };
+        Assert.False(list.UpdateSettings(b.Id, s)!.Run!.Ended);
+
+        var t = s.Target;
+        var run = list.UpdateSettings(b.Id, change switch
+        {
+            "server" => s with { Target = t with { Server = "other" } },
+            "database" => s with { Target = t with { Database = "other" } },
+            "auth" => s with { Target = t with { Auth = Auth.SqlServer } },
+            "user" => s with { Target = t with { User = "other" } },
+            "encrypt" => s with { Target = t with { Encrypt = Encrypt.Strict } },
+            "extra" => s with { Target = t with { ExtraConnectionString = "App=x" } },
+            "folder" => s with { Folder = root + Path.DirectorySeparatorChar },
+            "filters" => s with { Filters = "*.txt" },
+            _ => s with { Recurse = true },
+        })!.Run!;
+
+        Assert.True(run.Ended);
+        Assert.Equal(run, list.RerunFailed(b.Id)!.Run);
+        Assert.Equal(run, list.Rerun(b.Id, "a.sql")!.Run);
+        Assert.Single(executor.Calls);
+        var next = list.Run(b.Id)!.Run!; // Run starts a new run, with attempt counts from 0
+        Assert.False(next.Ended);
+        Assert.All(next.Scripts, x => Assert.Single(x.Attempts));
+    }
+
+    [Fact]
+    public async Task Load_again_with_another_target_ends_the_run()
+    {
+        var b = NewBatch(4, "a.sql");
+        list.Run(b.Id);
+        await Until(b.Id, r => !r.Active);
+        var file = Path.Combine(root, "x.sqlrunboard.json");
+        b = list.Save(b.Id, file, overwrite: false)!;
+        Assert.False(list.Reload(b.Id)!.Run!.Ended); // the same settings: the run continues
+
+        File.WriteAllText(file, BatchFile.Format(b.Settings with { Target = b.Settings.Target with { Server = "other" } }, b.Scripts));
+
+        Assert.True(list.Reload(b.Id)!.Run!.Ended);
+    }
+
     public void Dispose()
     {
         sub.Dispose();

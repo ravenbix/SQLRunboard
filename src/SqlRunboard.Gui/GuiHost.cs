@@ -48,6 +48,7 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
         var app = builder.Build();
+        app.Use(RejectForeignRequests);
         app.Use(RequireToken(token));
         var files = new EmbeddedFileProvider(typeof(GuiHost).Assembly, "SqlRunboard.Gui.wwwroot");
         app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
@@ -70,6 +71,18 @@ public sealed class GuiHost : IAsyncDisposable
     }
 
     public BatchList Batches => app.Services.GetRequiredService<BatchList>();
+
+    /// <summary>Other web sites must not use the server: reject an <c>Origin</c> other than our own.</summary>
+    static async Task RejectForeignRequests(HttpContext ctx, RequestDelegate next)
+    {
+        var origin = ctx.Request.Headers.Origin;
+        if (origin.Count > 0 && origin != $"{ctx.Request.Scheme}://{ctx.Request.Host}")
+        {
+            ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        await next(ctx);
+    }
 
     /// <summary>The token in the query string becomes a cookie, then a redirect drops it from the URL. All other requests need the cookie.</summary>
     static Func<HttpContext, RequestDelegate, Task> RequireToken(string token)

@@ -20,4 +20,21 @@ public class RequestSecurityTests
 
         Assert.Equal(expected, res.StatusCode);
     }
+
+    [Theory]
+    [InlineData("http://127.0.0.1:{port}", HttpStatusCode.OK)]
+    [InlineData("http://evil.example", HttpStatusCode.Forbidden)]
+    [InlineData("http://localhost:{port}", HttpStatusCode.Forbidden)]
+    [InlineData("http://127.0.0.1:1", HttpStatusCode.Forbidden)]
+    [InlineData("null", HttpStatusCode.Forbidden)]
+    public async Task A_request_from_a_different_origin_is_rejected(string origin, HttpStatusCode expected)
+    {
+        await using var app = await TestApp.StartAsync();
+        var req = new HttpRequestMessage(HttpMethod.Get, "/");
+        req.Headers.Add("Origin", origin.Replace("{port}", app.Host.BaseUrl.Port.ToString()));
+
+        var res = await app.Client().SendAsync(req, Ct);
+
+        Assert.Equal(expected, res.StatusCode);
+    }
 }

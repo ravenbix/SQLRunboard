@@ -144,10 +144,10 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
             var path = run.Queue[0];
             run.Queue.RemoveAt(0);
             var start = time.GetUtcNow();
-            string text;
+            IReadOnlyList<ScriptPart> parts;
             // Each script reads its file when it starts, so you can fix a Queued script.
             // ponytail: the read runs under the lock; move it out if slow network folders block the page.
-            try { text = File.ReadAllText(Path.Combine(run.Folder, path)); }
+            try { parts = SqlScript.Read(Path.Combine(run.Folder, path)); }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 run.Add(path, new Attempt(start, start, ScriptStatus.Failed, null, e is FileNotFoundException or DirectoryNotFoundException ? "File not found" : e.Message));
@@ -156,7 +156,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
             }
             run.Running++;
             run.Add(path, new Attempt(start, null, ScriptStatus.Running, null, null));
-            var execution = new SqlExecution(path, [text], new SqlConnectionSettings(run.Settings.Target, Password: null));
+            var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, Password: null));
             // The continuation runs on the thread pool, never inline here under the lock.
             var cts = run.Tokens[path] = run.Settings.TimeoutSeconds is int s ? new CancellationTokenSource(TimeSpan.FromSeconds(s), time) : new CancellationTokenSource();
             _ = executor.ExecuteAsync(execution, _ => { }, cts.Token)

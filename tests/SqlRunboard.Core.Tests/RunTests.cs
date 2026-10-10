@@ -85,6 +85,24 @@ public sealed class RunTests : IDisposable
     }
 
     [Fact]
+    public async Task A_script_is_sent_as_GO_parts_and_a_BOM_selects_the_encoding()
+    {
+        const string text = "select N'é'\r\nGO 2\r\nselect 2";
+        var b = NewBatch(4);
+        File.WriteAllText(Path.Combine(root, "utf8.sql"), text, new System.Text.UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(root, "utf8bom.sql"), text, new System.Text.UTF8Encoding(true));
+        File.WriteAllText(Path.Combine(root, "utf16le.sql"), text, new System.Text.UnicodeEncoding(false, true));
+        File.WriteAllText(Path.Combine(root, "utf16be.sql"), text, new System.Text.UnicodeEncoding(true, true));
+
+        list.Run(b.Id);
+        await Until(b.Id, r => !r.Active);
+
+        Assert.Equal(4, executor.Calls.Count);
+        foreach (var call in executor.Calls)
+            Assert.Equal([new ScriptPart("select N'é'", 2, 1), new ScriptPart("select 2", 1, 3)], call.Parts);
+    }
+
+    [Fact]
     public async Task Each_script_reads_its_file_when_it_starts_and_a_missing_file_fails()
     {
         var b = NewBatch(1, "a.sql", "b.sql", "c.sql");
@@ -96,7 +114,7 @@ public sealed class RunTests : IDisposable
         time.Advance(TimeSpan.FromSeconds(5));
 
         var run = await Until(b.Id, r => !r.Active);
-        Assert.Equal(["select 'fixed'"], executor.Calls.Single(c => c.ScriptName == "b.sql").Commands);
+        Assert.Equal([new ScriptPart("select 'fixed'", 1, 1)], executor.Calls.Single(c => c.ScriptName == "b.sql").Parts);
         Assert.Equal(ScriptStatus.Failed, StatusOf(run, "c.sql"));
         Assert.Equal("File not found", run.Scripts.Single(s => s.Path == "c.sql").Attempts.Single().Error);
         Assert.DoesNotContain(executor.Calls, c => c.ScriptName == "c.sql");

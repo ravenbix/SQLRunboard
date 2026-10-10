@@ -35,9 +35,19 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         lock (gate)
         {
             // ponytail: the scan runs under the lock; move it out if a slow network folder blocks the page.
-            return Replace(id, b => b with { Settings = settings, Scripts = Merge(b.Scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)) });
+            return Replace(id, b =>
+            {
+                var run = b.Run;
+                if (run is { Ended: false } && EndsRun(b.Settings, settings) && runs.Remove(id)) run = run with { Ended = true };
+                return b with { Settings = settings, Scripts = Merge(b.Scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)), Run = run };
+            });
         }
     }
+
+    /// <summary>A change to the target or the file scan ends the current run. The other settings apply to the next reruns.</summary>
+    static bool EndsRun(BatchSettings a, BatchSettings b) =>
+        a.Target with { PasswordVariable = null } != b.Target with { PasswordVariable = null }
+        || (a.Folder, a.Filters, a.Recurse) != (b.Folder, b.Filters, b.Recurse);
 
     /// <summary>Sets or clears the check box of one file. Null if no batch has this id.</summary>
     public Batch? SetInclude(int id, string path, bool include)
@@ -113,12 +123,42 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         return batch;
     }
 
+    /// <summary>
+    /// Reruns one completed script of the current run. It goes to the bottom of the queue and reads its file again.
+    /// Returns the batch, or null if no batch has this id.
+    /// </summary>
+    public Batch? Rerun(int id, string path) => Rerun(id, _ => [path]);
+
+    /// <summary>Reruns all Failed and Cancelled scripts of the current run, in the start order. Null if no batch has this id.</summary>
+    public Batch? RerunFailed(int id) =>
+        Rerun(id, run => [.. run.Scripts.Values.Where(s => s.Status is ScriptStatus.Failed or ScriptStatus.Cancelled).Select(s => s.Path)]);
+
+    // Reruns ignore the check boxes. They add attempts to the current run.
+    Batch? Rerun(int id, Func<ActiveRun, IReadOnlyList<string>> paths)
+    {
+        lock (gate)
+        {
+            if (runs.GetValueOrDefault(id) is { } run && Find(id) is { } batch)
+            {
+                run.Settings = batch.Settings; // reruns use the current parallel limit, stop setting and timeout
+                foreach (var path in paths(run))
+                    if (run.Scripts.TryGetValue(path, out var s) && s.Status is ScriptStatus.Succeeded or ScriptStatus.Failed or ScriptStatus.Cancelled)
+                    {
+                        run.Scripts[path] = s with { Status = ScriptStatus.Queued, Error = null };
+                        run.Queue.Add(path);
+                    }
+                Pump(id, run);
+            }
+            return Find(id);
+        }
+    }
+
     /// <summary>The mutable state of a run. Change it only under the lock.</summary>
     sealed class ActiveRun(DateTimeOffset start, string folder, BatchSettings settings)
     {
         public DateTimeOffset Start => start;
         public string Folder => folder;
-        public BatchSettings Settings => settings;
+        public BatchSettings Settings { get; set; } = settings; // a rerun sets the current settings; they cannot change while scripts run
         public OrderedDictionary<string, ScriptRun> Scripts { get; } = new(StringComparer.Ordinal); // the start order
         public List<string> Queue { get; } = [];
         public int Running { get; set; }
@@ -129,7 +169,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         /// <summary>"Stop the queue at the first failure": no new scripts start. The Running scripts continue.</summary>
         public void Failed()
         {
-            if (!settings.StopOnFirstFailure) return;
+            if (!Settings.StopOnFirstFailure) return;
             foreach (var path in Queue) Scripts[path] = Scripts[path] with { Status = ScriptStatus.Cancelled, Error = "Not started: the queue stopped" };
             Queue.Clear();
         }

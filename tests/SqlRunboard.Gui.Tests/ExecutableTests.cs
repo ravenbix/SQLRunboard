@@ -1,0 +1,53 @@
+using System.Diagnostics;
+using System.Net;
+
+public class ExecutableTests
+{
+    static readonly CancellationToken Ct = TestContext.Current.CancellationToken;
+
+    [Fact]
+    public async Task Starts_the_server_in_the_given_app_data_folder_without_a_browser_and_prints_the_start_url()
+    {
+        var appData = Path.Combine(Path.GetTempPath(), "sqlrunboard-exe-" + Guid.NewGuid().ToString("N"));
+        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
+        {
+            ArgumentList = { Path.Combine(AppContext.BaseDirectory, "sqlrunboard.dll"), "--app-data", appData, "--no-browser" },
+            RedirectStandardOutput = true,
+        };
+        using var exe = Process.Start(psi)!;
+        try
+        {
+            var line = await exe.StandardOutput.ReadLineAsync(Ct).AsTask().WaitAsync(TimeSpan.FromSeconds(30), Ct) ?? "";
+            var url = new Uri(line[line.IndexOf("http")..]);
+
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
+            var res = await http.GetAsync(url, Ct);
+
+            Assert.Equal(HttpStatusCode.Redirect, res.StatusCode);
+            Assert.Equal("127.0.0.1", url.Host);
+            Assert.True(Directory.Exists(appData));
+        }
+        finally
+        {
+            exe.Kill(entireProcessTree: true);
+            await exe.WaitForExitAsync(Ct);
+            if (Directory.Exists(appData)) Directory.Delete(appData, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task An_unknown_argument_prints_the_usage_and_exits_with_code_2()
+    {
+        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
+        {
+            ArgumentList = { Path.Combine(AppContext.BaseDirectory, "sqlrunboard.dll"), "--bogus" },
+            RedirectStandardError = true,
+        };
+        using var exe = Process.Start(psi)!;
+        var error = await exe.StandardError.ReadToEndAsync(Ct);
+        await exe.WaitForExitAsync(Ct);
+
+        Assert.Equal(2, exe.ExitCode);
+        Assert.Contains("Usage: sqlrunboard", error);
+    }
+}

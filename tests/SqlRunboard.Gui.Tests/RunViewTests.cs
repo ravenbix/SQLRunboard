@@ -11,6 +11,8 @@ public class RunViewTests : AppPageTest
     ILocator Panel => Page.Locator("#panel");
     ILocator View(string name) => Panel.GetByRole(AriaRole.Group, new() { Name = "View" }).GetByRole(AriaRole.Button, new() { Name = name });
     ILocator Side(string name) => Page.GetByRole(AriaRole.Navigation, new() { Name = "Batches" }).Locator($"[role=option]:has-text('{name}')");
+    // The batch events can come after the click on the side list, so open the Run tab by hand.
+    async Task OpenRun(string name) { await Side(name).ClickAsync(); await Page.GetByRole(AriaRole.Tab, new() { Name = "Run" }).ClickAsync(); }
     ILocator Rows => Panel.Locator("table tbody tr");
 
     Batch RunningBatch()
@@ -27,7 +29,7 @@ public class RunViewTests : AppPageTest
     public async Task The_table_shows_the_run_in_queue_order()
     {
         var b = RunningBatch();
-        await Side(b.Name).ClickAsync();
+        await OpenRun(b.Name);
         await View("Table").ClickAsync();
 
         await Expect(Panel.Locator("table thead th")).ToHaveTextAsync(["#", "Status", "Script", "Start", "Elapsed", "Attempts", "Rows"]);
@@ -43,7 +45,7 @@ public class RunViewTests : AppPageTest
     public async Task Board_and_table_use_the_same_selection()
     {
         var b = RunningBatch();
-        await Side(b.Name).ClickAsync();
+        await OpenRun(b.Name);
         await Panel.Locator(".card:has-text('b.sql')").ClickAsync();
         await View("Table").ClickAsync();
 
@@ -57,7 +59,7 @@ public class RunViewTests : AppPageTest
     public async Task The_right_click_menu_works_on_a_table_row()
     {
         var b = RunningBatch();
-        await Side(b.Name).ClickAsync();
+        await OpenRun(b.Name);
         await View("Table").ClickAsync();
         await Panel.Locator("tr:has-text('c.sql')").ClickAsync(new() { Button = MouseButton.Right });
 
@@ -71,7 +73,7 @@ public class RunViewTests : AppPageTest
     public async Task The_Run_tab_opens_the_last_view_also_after_a_restart()
     {
         var b = RunningBatch();
-        await Side(b.Name).ClickAsync();
+        await OpenRun(b.Name);
         await View("Table").ClickAsync();
         await Expect(View("Table")).ToHaveAttributeAsync("aria-pressed", "true");
 
@@ -87,6 +89,7 @@ public class RunViewTests : AppPageTest
         var page = await context.NewPageAsync();
         await OpenAsync(page, again.StartUrl);
         await page.Locator($"[role=option]:has-text('{b2.Name}')").ClickAsync();
+        await page.GetByRole(AriaRole.Tab, new() { Name = "Run" }).ClickAsync();
 
         await Expect(page.Locator("#panel table")).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Table" })).ToHaveAttributeAsync("aria-pressed", "true");

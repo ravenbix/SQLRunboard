@@ -1,0 +1,14 @@
+# Local SQL Server for the integration tests (docs/SPEC.md "Tests"). The image is amd64 only:
+# on Apple Silicon, turn on Rosetta in Docker Desktop.
+#   MSSQL_SA_PASSWORD=<strong password> docker compose up -d
+#   SQLRUNBOARD_TEST_SQL="Server=localhost,1433;User ID=sa;Password=<same>;TrustServerCertificate=true"
+#   dotnet test --project tests/SqlRunboard.Integration.Tests
+services:
+  sql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD}
+    ports:
+      - "${SQL_PORT:-1433}:1433"

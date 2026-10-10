@@ -61,6 +61,55 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     }
 
     /// <summary>
+    /// Moves one script. During a run it moves a Queued script in the queue of that run only. Otherwise it changes the start order.
+    /// Null if no batch has this id.
+    /// </summary>
+    public Batch? Move(int id, string path, MoveTo to)
+    {
+        lock (gate)
+        {
+            if (Find(id) is not { } b) return null;
+            if (b.Run?.Active == true)
+            {
+                if (runs.GetValueOrDefault(id) is { } run && MoveIn(run.Queue, p => p == path, to)) Pump(id, run);
+                return Find(id);
+            }
+            var scripts = b.Scripts.ToList();
+            return MoveIn(scripts, s => s.Path == path, to) ? Replace(id, x => x with { Scripts = scripts }) : b;
+        }
+    }
+
+    /// <summary>Moves a batch in the side list. SSE event "order" with the ids in the new order. False if no batch has this id.</summary>
+    public bool MoveBatch(int id, MoveTo to)
+    {
+        lock (gate)
+        {
+            if (Find(id) is null) return false;
+            if (MoveIn(batches, b => b.Id == id, to)) Publish(new Change("order", new { ids = batches.Select(b => b.Id).ToArray() }));
+            return true;
+        }
+    }
+
+    /// <summary>"Sort by file name": the start order becomes the natural sort. Null if no batch has this id.</summary>
+    public Batch? SortByFileName(int id)
+    {
+        lock (gate)
+            return Replace(id, b => b with { Scripts = [.. b.Scripts.OrderBy(s => s.Path, FileScan.NaturalOrder).ThenBy(s => s.Path, StringComparer.Ordinal)] });
+    }
+
+    /// <summary>Moves the first match. False if there is no match or it is already at that end.</summary>
+    static bool MoveIn<T>(List<T> list, Predicate<T> match, MoveTo to)
+    {
+        var i = list.FindIndex(match);
+        if (i < 0) return false;
+        var item = list[i];
+        list.RemoveAt(i);
+        var j = to switch { MoveTo.Top => 0, MoveTo.Bottom => list.Count, MoveTo.Up => Math.Max(0, i - 1), _ => Math.Min(list.Count, i + 1) };
+        list.Insert(j, item);
+        return i != j;
+    }
+
+    /// <summary>
     /// Writes the batch file. Path null: Save, to the current file. Otherwise Save as, to that full path; the app adds .sqlrunboard.json if it is not there.
     /// Throws BatchFileChangedException if the file on disk is not the version that the app loaded, unless overwrite is true. Null if no batch has this id.
     /// </summary>
@@ -77,10 +126,12 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             // ponytail: Save as over another existing file overwrites it without a question; ask first if users lose files that way.
             if (!overwrite && file == b.File && File.Exists(file) && File.ReadAllText(file) != loaded.GetValueOrDefault(id)) throw new BatchFileChangedException(file);
             var settings = b.Settings with { Folder = Rebase(b.File, file, b.Settings.Folder) };
-            var text = BatchFile.Format(settings, b.Scripts);
+            // Save removes the Missing entries and clears the New marks.
+            List<ScriptEntry> scripts = [.. b.Scripts.Where(s => s.State != ScriptState.Missing).Select(s => s with { State = null })];
+            var text = BatchFile.Format(settings, scripts);
             File.WriteAllText(file, text);
             loaded[id] = text;
-            var batch = batches[i] = b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings };
+            var batch = batches[i] = b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings, Scripts = scripts };
             Publish(new Change("batch", batch));
             return batch;
         }
@@ -183,7 +234,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             // ponytail: a log folder that cannot be made (read-only folder) stops the Run with the IO error; run without logs if users need that.
             var log = logParent is null ? null : RunLog.Create(logParent, b.Name, time, text => Warn(id, text));
             var run = runs[id] = new ActiveRun(time.GetUtcNow(), folder ?? "", b.Settings, log);
-            foreach (var s in scripts.Where(s => s.Include))
+            foreach (var s in scripts.Where(s => s.Include && s.State != ScriptState.Missing))
             {
                 run.Scripts[s.Path] = new ScriptRun(s.Path, ScriptStatus.Queued, []);
                 run.Queue.Add(s.Path);
@@ -347,12 +398,16 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     static string? FolderPath(string? batchFile, string? folder) =>
         string.IsNullOrWhiteSpace(folder) || batchFile is null ? folder : Path.Combine(Path.GetDirectoryName(batchFile)!, folder);
 
-    /// <summary>Known files keep their place and check box; new files go at the bottom in file-name order. Files not on disk drop out.</summary>
+    /// <summary>
+    /// Known files keep their place and check box; new files go at the bottom in file-name order, marked New.
+    /// Files not on disk stay, marked Missing, until the next save.
+    /// </summary>
     static IReadOnlyList<ScriptEntry> Merge(IReadOnlyList<ScriptEntry> known, IReadOnlyList<string> found)
     {
         var onDisk = found.ToHashSet(StringComparer.Ordinal);
         var old = known.Select(s => s.Path).ToHashSet(StringComparer.Ordinal);
-        return [.. known.Where(s => onDisk.Contains(s.Path)), .. found.Where(p => !old.Contains(p)).Select(p => new ScriptEntry(p, Include: true))];
+        return [.. known.Select(s => !onDisk.Contains(s.Path) ? s with { State = ScriptState.Missing } : s.State == ScriptState.Missing ? s with { State = null } : s),
+            .. found.Where(p => !old.Contains(p)).Select(p => new ScriptEntry(p, Include: true, ScriptState.New))];
     }
 
     /// <summary>The snapshot and the subscription are taken under one lock, so no change is lost between them.</summary>

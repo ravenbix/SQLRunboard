@@ -38,6 +38,6 @@ public static class BatchFile
             ConfirmBeforeRun = j.ConfirmBeforeRun, TimeoutSeconds = j.TimeoutSeconds, Target = j.Target ?? new(),
         };
         if (!settings.IsValid || j.Scripts?.Any(s => s?.Path is null) == true) throw new InvalidDataException("The batch file has an incorrect setting.");
-        return (settings, j.Scripts ?? []);
+        return (settings, [.. (j.Scripts ?? []).Select(s => new ScriptEntry(s.Path, s.Include))]); // a State in the file is not ours
     }
 }

@@ -3,6 +3,7 @@ using System.Net.ServerSentEvents;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -22,10 +23,13 @@ public sealed record GuiHostOptions(string AppDataFolder, ISqlExecutor Executor,
 public sealed class GuiHost : IAsyncDisposable
 {
     public const string CookieName = "sqlrunboard";
+    /// <summary>In the app data folder. JSON <c>{"url","token"}</c>. Shared by sqlrunboard and sqlrunboard-desktop.</summary>
+    public const string LockFileName = "sqlrunboard.lock";
 
     readonly WebApplication app;
+    readonly string lockPath;
 
-    GuiHost(WebApplication app, Uri baseUrl, string token) { this.app = app; BaseUrl = baseUrl; Token = token; }
+    GuiHost(WebApplication app, Uri baseUrl, string token, string lockPath) { this.app = app; BaseUrl = baseUrl; Token = token; this.lockPath = lockPath; }
 
     public Uri BaseUrl { get; }
     public string Token { get; }
@@ -59,7 +63,40 @@ public sealed class GuiHost : IAsyncDisposable
         app.MapPost("/api/batches", (BatchList list) => list.NewBatch());
 
         await app.StartAsync();
-        return new GuiHost(app, new Uri(app.Urls.First()), token);
+        var host = new GuiHost(app, new Uri(app.Urls.First()), token, Path.Combine(options.AppDataFolder, LockFileName));
+        host.WriteLock();
+        return host;
+    }
+
+    record LockFile(Uri Url, string Token);
+
+    /// <summary>The start URL of the server in the lock file, or null when no server answers there with that token (a stale or missing lock file).</summary>
+    public static async Task<Uri?> FindRunningAsync(string appDataFolder)
+    {
+        try
+        {
+            var path = Path.Combine(appDataFolder, LockFileName);
+            if (!File.Exists(path)) return null;
+            if (JsonSerializer.Deserialize<LockFile>(File.ReadAllText(path), JsonSerializerOptions.Web) is not { Url: { } url, Token: { } token }) return null;
+            var startUrl = new Uri(url, "/?token=" + Uri.EscapeDataString(token));
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(3) };
+            using var res = await http.GetAsync(startUrl);
+            return res.StatusCode == HttpStatusCode.Redirect ? startUrl : null; // only our server with this token redirects
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or IOException or UriFormatException)
+        {
+            return null;
+        }
+    }
+
+    // ponytail: check-then-write, so two starts in the same instant can both run. Add an OS file lock if that matters.
+    void WriteLock()
+    {
+        File.Delete(lockPath); // a stale file can have other permissions; create it new with mode 600
+        var fs = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows()) fs.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using var stream = new FileStream(lockPath, fs);
+        JsonSerializer.Serialize(stream, new LockFile(BaseUrl, Token), JsonSerializerOptions.Web);
     }
 
     static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, [EnumeratorCancellation] CancellationToken ct)

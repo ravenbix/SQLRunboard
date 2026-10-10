@@ -16,11 +16,23 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
+// Single instance: a server already runs for this user, so open the browser to it and stop.
+if (await GuiHost.FindRunningAsync(appData) is { } running)
+{
+    Open(running);
+    return 0;
+}
+
 var time = TimeProvider.System;
 // ponytail: the fake executor runs until the real SQL Server adapter (ticket #7) replaces it.
 await using var host = await GuiHost.StartAsync(new GuiHostOptions(appData, new FakeSqlExecutor(time), time));
-Console.WriteLine($"SQLRunboard: {host.StartUrl}");
-// UseShellExecute opens the default browser: start on Windows, open on macOS, xdg-open on Linux.
-if (openBrowser) Process.Start(new ProcessStartInfo(host.StartUrl.ToString()) { UseShellExecute = true });
+Open(host.StartUrl);
 await host.WaitForShutdownAsync(); // Ctrl+C stops the server
 return 0;
+
+void Open(Uri url)
+{
+    Console.WriteLine($"SQLRunboard: {url}");
+    // UseShellExecute opens the default browser: start on Windows, open on macOS, xdg-open on Linux.
+    if (openBrowser) Process.Start(new ProcessStartInfo(url.ToString()) { UseShellExecute = true });
+}

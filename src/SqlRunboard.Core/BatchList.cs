@@ -16,6 +16,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
     readonly List<Batch> batches = [];
     readonly Dictionary<int, ActiveRun> runs = [];
     readonly List<Channel<Change>> subscribers = [];
+    readonly Dictionary<int, string> passwords = []; // in memory only: never in a Batch, a file or an event
     int lastId, lastUntitled;
 
     public Batch NewBatch()
@@ -35,8 +36,37 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         lock (gate)
         {
             // ponytail: the scan runs under the lock; move it out if a slow network folder blocks the page.
-            return Replace(id, b => b with { Settings = settings, Scripts = Merge(b.Scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)) });
+            return Replace(id, b =>
+            {
+                if (b.Settings.Target != settings.Target) passwords.Remove(id); // a new target asks for the password again
+                return b with { Settings = settings, Scripts = Merge(b.Scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)) };
+            });
         }
+    }
+
+    /// <summary>
+    /// Test connection, and the logon check before a run. A password replaces the kept one; null uses the kept one.
+    /// A SQL Server logon with no password gives LogonFailed with no Error and no connection: ask for it.
+    /// The server keeps a password that works and forgets one that the server rejects. Null if no batch has this id.
+    /// </summary>
+    public async Task<SqlLogon?> LogonAsync(int id, string? password, CancellationToken ct)
+    {
+        BatchTarget target;
+        lock (gate)
+        {
+            if (Find(id) is not { } b) return null;
+            target = b.Settings.Target;
+            password ??= passwords.GetValueOrDefault(id);
+        }
+        if (target.Auth == Auth.SqlServer && password is null) return new SqlLogon(null, null, null, LogonFailed: true);
+        var logon = await executor.LogonAsync(new SqlConnectionSettings(target, password), ct);
+        lock (gate)
+        {
+            if (Find(id)?.Settings.Target != target) return logon; // the target changed meanwhile: keep nothing
+            if (logon.LogonFailed) passwords.Remove(id);
+            else if (logon.Error is null && password is not null) passwords[id] = password;
+        }
+        return logon;
     }
 
     /// <summary>Sets or clears the check box of one file. Null if no batch has this id.</summary>
@@ -156,7 +186,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
             }
             run.Running++;
             run.Add(path, new Attempt(start, null, ScriptStatus.Running, null, null));
-            var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, Password: null));
+            var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, passwords.GetValueOrDefault(id)));
             // The continuation runs on the thread pool, never inline here under the lock.
             var cts = run.Tokens[path] = run.Settings.TimeoutSeconds is int s ? new CancellationTokenSource(TimeSpan.FromSeconds(s), time) : new CancellationTokenSource();
             _ = executor.ExecuteAsync(execution, _ => { }, cts.Token)
@@ -180,6 +210,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
                 : t.IsCanceled ? new Attempt(start, end, ScriptStatus.Failed, null, $"Timeout after {run.Settings.TimeoutSeconds} s")
                 : new Attempt(start, end, ScriptStatus.Failed, null, t.Exception!.GetBaseException().Message));
             run.Running--;
+            if (t.IsCompletedSuccessfully && t.Result.LogonFailed) passwords.Remove(id); // the page asks again at the next run
             if (run.Scripts[path].Status == ScriptStatus.Failed) run.Failed();
             Pump(id, run);
         }

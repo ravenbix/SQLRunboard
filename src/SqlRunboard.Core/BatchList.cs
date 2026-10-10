@@ -48,6 +48,37 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
     }
 
     /// <summary>
+    /// Moves one script. During a run it moves a Queued script in the queue of that run only. Otherwise it changes the start order.
+    /// Null if no batch has this id.
+    /// </summary>
+    public Batch? Move(int id, string path, MoveTo to)
+    {
+        lock (gate)
+        {
+            if (Find(id) is not { } b) return null;
+            if (b.Run?.Active == true)
+            {
+                if (runs.GetValueOrDefault(id) is { } run && MoveIn(run.Queue, p => p == path, to)) Pump(id, run);
+                return Find(id);
+            }
+            var scripts = b.Scripts.ToList();
+            return MoveIn(scripts, s => s.Path == path, to) ? Replace(id, x => x with { Scripts = scripts }) : b;
+        }
+    }
+
+    /// <summary>Moves the first match. False if there is no match or it is already at that end.</summary>
+    static bool MoveIn<T>(List<T> list, Predicate<T> match, MoveTo to)
+    {
+        var i = list.FindIndex(match);
+        if (i < 0) return false;
+        var item = list[i];
+        list.RemoveAt(i);
+        var j = to switch { MoveTo.Top => 0, MoveTo.Bottom => list.Count, MoveTo.Up => Math.Max(0, i - 1), _ => Math.Min(list.Count, i + 1) };
+        list.Insert(j, item);
+        return i != j;
+    }
+
+    /// <summary>
     /// Writes the batch file. Path null: Save, to the current file. Otherwise Save as, to that full path; the app adds .sqlrunboard.json if it is not there.
     /// Throws BatchFileChangedException if the file on disk is not the version that the app loaded, unless overwrite is true. Null if no batch has this id.
     /// </summary>

@@ -123,6 +123,49 @@ public class BoardTests : AppPageTest
         await Expect(Page.Locator("#drawer .msgs")).ToContainTextAsync("Not started: the queue stopped");
     }
 
+    [Fact]
+    public async Task Rerun_from_the_card_menu_and_Rerun_all_failed_open_the_run_again()
+    {
+        var b = NewBatch(4, "a.sql", "b.sql", "c.sql");
+        Script("a.sql", 5, ScriptStatus.Failed); Script("b.sql", 5); Script("c.sql", 5, ScriptStatus.Failed);
+        App.Host.Batches.Run(b.Id);
+        await Side(b.Name).ClickAsync();
+        App.Time.Advance(TimeSpan.FromSeconds(5));
+        await Expect(Cards("Failed / Cancelled")).ToHaveCountAsync(2);
+        await Expect(Side(b.Name).Locator(".st")).ToHaveTextAsync("✕");
+
+        Script("b.sql", 60);
+        await Column("Succeeded").Locator(".card:has-text('b.sql')").ClickAsync(new() { Button = MouseButton.Right });
+        await Page.GetByRole(AriaRole.Menuitem, new() { Name = "Rerun" }).ClickAsync();
+        await Expect(Cards("Running")).ToHaveTextAsync(["b.sql"]);
+        await Expect(Column("Running").Locator(".card .r2")).ToContainTextAsync("attempt 2");
+        await Expect(Side(b.Name).Locator(".st")).ToHaveTextAsync("▶");
+        await Expect(Header.GetByRole(AriaRole.Button, new() { Name = "Run", Exact = true })).ToBeDisabledAsync();
+
+        await Header.GetByRole(AriaRole.Button, new() { Name = "Rerun all failed" }).ClickAsync();
+        await Expect(Cards("Running")).ToHaveCountAsync(3);
+        await Expect(Cards("Failed / Cancelled")).ToHaveCountAsync(0);
+    }
+
+    [Fact]
+    public async Task A_target_change_ends_the_run_and_disables_the_reruns()
+    {
+        var b = NewBatch(4, "a.sql");
+        Script("a.sql", 5, ScriptStatus.Failed);
+        App.Host.Batches.Run(b.Id);
+        await Side(b.Name).ClickAsync();
+        App.Time.Advance(TimeSpan.FromSeconds(5));
+        var rerunFailed = Header.GetByRole(AriaRole.Button, new() { Name = "Rerun all failed" });
+        await Expect(rerunFailed).ToBeEnabledAsync();
+
+        App.Host.Batches.UpdateSettings(b.Id, b.Settings with { Target = b.Settings.Target with { Server = "other" } });
+
+        await Expect(Panel).ToContainTextAsync("The settings changed. Run the batch again.");
+        await Expect(rerunFailed).ToBeDisabledAsync();
+        await Column("Failed / Cancelled").Locator(".card:has-text('a.sql')").ClickAsync(new() { Button = MouseButton.Right });
+        await Expect(Page.GetByRole(AriaRole.Menuitem, new() { Name = "Rerun" })).ToBeDisabledAsync();
+    }
+
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();

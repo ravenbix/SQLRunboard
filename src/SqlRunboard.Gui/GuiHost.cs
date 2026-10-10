@@ -76,6 +76,10 @@ public sealed class GuiHost : IAsyncDisposable
             list.Cancel(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/cancel-all", (int id, BatchList list) =>
             list.CancelAll(id) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/rerun", (int id, ScriptRequest r, BatchList list) =>
+            list.Rerun(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/rerun-failed", (int id, BatchList list) =>
+            list.RerunFailed(id) is { } b ? Results.Ok(b) : Results.NotFound());
         // The browser has no folder picker that gives a path, so the page browses the folders here.
         app.MapPost("/api/folders", (FolderRequest r) =>
         {

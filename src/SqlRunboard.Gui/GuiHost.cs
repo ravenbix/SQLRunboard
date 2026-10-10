@@ -75,6 +75,8 @@ public sealed class GuiHost : IAsyncDisposable
             : list.UpdateSettings(id, settings) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/include", (int id, IncludeRequest r, BatchList list) =>
             list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/run", (int id, BatchList list) =>
+            list.Run(id) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/open", (PathRequest r, BatchList list) => FileResult(() => list.Open(r.Path)));
         app.MapPost("/api/batches/{id:int}/save", (int id, SaveRequest r, BatchList list) => FileResult(() => list.Save(id, r.Path, r.Overwrite)));
         app.MapPost("/api/batches/{id:int}/reload", (int id, BatchList list) => FileResult(() => list.Reload(id)));

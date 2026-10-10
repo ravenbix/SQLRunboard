@@ -4,7 +4,7 @@ using SqlRunboard.Core;
 public sealed class BatchFileTests : IDisposable
 {
     readonly string root = Directory.CreateTempSubdirectory("sqlrunboard-batch-").FullName;
-    readonly BatchList list = new();
+    readonly BatchList list = new(new FakeSqlExecutor(TimeProvider.System), TimeProvider.System); // no runs here
 
     void Touch(params string[] paths)
     {

@@ -19,7 +19,7 @@ public class FakeSqlExecutorTests
         };
         var messages = new List<SqlMessage>();
 
-        var run = executor.ExecuteAsync(new SqlExecution("005_fk.sql", ["SELECT 1", "SELECT 2"], Connection), messages.Add, CancellationToken.None);
+        var run = executor.ExecuteAsync(new SqlExecution("005_fk.sql", [new ScriptPart("SELECT 1", 1, 1), new ScriptPart("SELECT 2", 3, 2)], Connection), messages.Add, CancellationToken.None);
         time.Advance(TimeSpan.FromSeconds(29));
         Assert.False(run.IsCompleted);
         time.Advance(TimeSpan.FromSeconds(1));
@@ -30,7 +30,7 @@ public class FakeSqlExecutorTests
             [new SqlMessage(SqlMessageKind.Info, "Step 1 of 3 done"), new SqlMessage(SqlMessageKind.Error, "line 214 (part 3): FK conflict")],
             messages);
         var call = Assert.Single(executor.Calls);
-        Assert.Equal(["SELECT 1", "SELECT 2"], call.Commands);
+        Assert.Equal([new ScriptPart("SELECT 1", 1, 1), new ScriptPart("SELECT 2", 3, 2)], call.Parts);
         Assert.Equal("sql01", call.Connection.Target.Server);
         Assert.Equal("secret", call.Connection.Password);
     }
@@ -40,7 +40,7 @@ public class FakeSqlExecutorTests
     {
         var executor = new FakeSqlExecutor(new FakeTime());
 
-        var result = await executor.ExecuteAsync(new SqlExecution("x.sql", ["SELECT 1"], Connection), _ => { }, CancellationToken.None);
+        var result = await executor.ExecuteAsync(new SqlExecution("x.sql", [new ScriptPart("SELECT 1", 1, 1)], Connection), _ => { }, CancellationToken.None);
 
         Assert.Equal(new SqlResult(ScriptStatus.Succeeded, null, null), result);
     }
@@ -52,7 +52,7 @@ public class FakeSqlExecutorTests
         executor.Scripts["slow.sql"] = new FakeScript { Duration = TimeSpan.FromMinutes(5) };
         using var cts = new CancellationTokenSource();
 
-        var run = executor.ExecuteAsync(new SqlExecution("slow.sql", ["SELECT 1"], Connection), _ => { }, cts.Token);
+        var run = executor.ExecuteAsync(new SqlExecution("slow.sql", [new ScriptPart("SELECT 1", 1, 1)], Connection), _ => { }, cts.Token);
         cts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);

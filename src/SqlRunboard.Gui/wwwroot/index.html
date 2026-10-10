@@ -211,7 +211,16 @@ const app = { theme: store.get('theme', 'System'), view: store.get('view', 'boar
 // ---------- server state ----------
 // The server keeps all batch state. Each server batch merges into a page object that also keeps the view state (tab, selection, drawer).
 // The page uses the flat settings of the prototype; the server uses the batch file shape (target is nested).
-const toView = sb => ({ ...sb, settings: { ...sb.settings, ...sb.settings.target, extra: sb.settings.target.extraConnectionString, timeoutSeconds: sb.settings.timeoutSeconds ?? '' } });
+const toView = sb => ({ ...sb, run: toRun(sb.run), settings: { ...sb.settings, ...sb.settings.target, extra: sb.settings.target.extraConnectionString, timeoutSeconds: sb.settings.timeoutSeconds ?? '' } });
+// The server run (ISO times) in the prototype shape: times are seconds from the start of the run.
+// run.t is "now" on the server clock: the page clock plus the offset that the last state gave (the tests use a fake server clock).
+function toRun(r) {
+  if (!r) return null;
+  const t0 = Date.parse(r.start), sec = x => x == null ? null : (Date.parse(x) - t0) / 1000, skew = Date.parse(r.now) - Date.now(), rs = {};
+  for (const s of r.scripts) rs[s.path] = { status: s.status, msgs: [], attempts: s.attempts.map((a, i) => ({ n: i + 1, start: sec(a.start), end: sec(a.end), status: a.status, rows: a.rows, error: a.error })) };
+  const ended = !r.scripts.some(s => s.status === 'Queued' || s.status === 'Running');
+  return { rs, queue: r.queue, wall: new Date(t0), live: true, ended, endAt: ended ? Math.max(0, ...Object.values(rs).flatMap(x => x.attempts.map(a => a.end ?? 0))) : null, get t() { return (Date.now() + skew - t0) / 1000; } };
+}
 const fromView = s => ({ folder: s.folder || null, filters: s.filters, recurse: s.recurse, parallelLimit: +s.parallelLimit, stopOnFirstFailure: s.stopOnFirstFailure, confirmBeforeRun: s.confirmBeforeRun,
   timeoutSeconds: s.timeoutSeconds === '' ? null : +s.timeoutSeconds,
   target: { server: s.server, database: s.database, auth: s.auth, user: s.user, passwordVariable: s.passwordVariable, encrypt: s.encrypt, trustServerCertificate: s.trustServerCertificate, extraConnectionString: s.extra } });
@@ -260,7 +269,7 @@ const locked = b => !!b.signing || !!(b.run && b.run.live && !b.run.ended);
 
 // ponytail: stand-ins for the commands of later tickets. Each ticket replaces its names with a POST.
 const todo = () => toast('Not available yet.');
-const runBatch = todo, cancel = todo, cancelAll = todo, rerun = todo, move = todo, logon = todo;
+const cancel = todo, cancelAll = todo, rerun = todo, move = todo, logon = todo;
 // Edits go to the server one at a time, in the order you make them. queued() gives the error to the caller; sendEdit() shows it.
 let edits = Promise.resolve();
 function queued(url, body) { const p = edits.then(() => post(url, body)); edits = p.catch(() => null); return p; }
@@ -268,6 +277,11 @@ const sendEdit = (url, body) => queued(url, body).catch(e => { toast(e.message);
 function saveSettings(b) {
   b.saving = (b.saving ?? 0) + 1;
   sendEdit(`/api/batches/${b.id}/settings`, fromView(b.settings)).then(sb => { if (--b.saving) return; if (sb) upsert(sb); render(); });
+}
+async function runBatch(b) {
+  if (!b || b.missing || locked(b)) return;
+  const sb = await sendEdit(`/api/batches/${b.id}/run`, {});
+  if (sb) { upsert(sb); b.tab = 'run'; render(); }
 }
 function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
 // The folder, Open and Save as dialogs: the server lists the folders (and the batch files). kind: folder, open or saveAs.
@@ -644,7 +658,11 @@ function openMenu(b, path, x, y) {
 function closeMenu(refocusBack = true) { const back = app.menu?.back; app.menu = null; document.getElementById('menu').innerHTML = ''; if (refocusBack) refocus(back); }
 
 // ---------- commands ----------
-function selectBatch(id) { app.cur = id; closeMenu(false); render(); }
+function selectBatch(id) { // Files before the first run, Run after it
+  const b = app.batches.find(x => x.id === id);
+  if (b && id !== app.cur) b.tab = null;
+  app.cur = id; closeMenu(false); render();
+}
 async function newBatch() { // Ctrl+N
   let b;
   try { b = upsert(await post('/api/batches')); } catch (e) { return toast(e.message); } // the SSE event can come before or after this
@@ -822,6 +840,7 @@ applyTheme();
 setDrawerWidth(app.drawerWidth);
 render();
 connect();
+setInterval(() => app.batches.some(b => b.run && !b.run.ended) && render({ tick: true }), 1000); // the elapsed time of Running scripts
 </script>
 </body>
 </html>

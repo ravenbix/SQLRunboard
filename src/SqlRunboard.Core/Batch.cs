@@ -36,5 +36,5 @@ public sealed record BatchSettings
 /// <summary>One file of the batch. Path is relative to the folder, with /. Include false: a cleared check box.</summary>
 public sealed record ScriptEntry(string Path, bool Include);
 
-/// <summary>One entry in the side list. File is null for an unsaved batch. Scripts is the start order.</summary>
-public sealed record Batch(int Id, string Name, string? File, bool Dirty, BatchSettings Settings, IReadOnlyList<ScriptEntry> Scripts);
+/// <summary>One entry in the side list. File is null for an unsaved batch. Scripts is the start order. Run is the current run, or null.</summary>
+public sealed record Batch(int Id, string Name, string? File, bool Dirty, BatchSettings Settings, IReadOnlyList<ScriptEntry> Scripts, RunState? Run = null);

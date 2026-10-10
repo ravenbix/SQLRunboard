@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="../SqlRunboard.Core/SqlRunboard.Core.csproj" />
+    <EmbeddedResource Include="wwwroot/**" />
+  </ItemGroup>
+</Project>

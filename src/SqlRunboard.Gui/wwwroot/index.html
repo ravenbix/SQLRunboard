@@ -536,7 +536,14 @@ function focusSel(el) {
   return `${scope.id ? '#' + scope.id : '.topbar'} [${a}="${CSS.escape(el.getAttribute(a))}"]`;
 }
 const refocus = sel => sel && document.querySelector(sel)?.focus({ preventScroll: true });
+// A rebuild between pointerdown and pointerup swaps the element under the pointer, and the browser then sends no click
+// (live runs rebuild every second). So hold the renders while a button is down, and render once when it comes up.
+// ponytail: a pointerdown with no pointerup (some scrollbars) holds the renders until the next click.
+let held = false;
+addEventListener('pointerdown', () => { held = true; }, true);
+for (const t of ['pointerup', 'pointercancel']) addEventListener(t, () => { held = false; setTimeout(render); }, true);
 function render(o = {}) {
+  if (held) return;
   const b = cur(), ae = document.activeElement, k = focusSel(ae);
   const panelEl = document.getElementById('panel'), drawerEl = document.getElementById('drawer');
   const msgsEl = drawerEl.querySelector('.msgs'), msgsBottom = msgsEl && msgsEl.scrollTop + msgsEl.clientHeight >= msgsEl.scrollHeight - 4, msgsTop = msgsEl?.scrollTop;

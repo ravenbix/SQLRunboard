@@ -134,6 +134,37 @@ public sealed class RunLogTests : IDisposable
     }
 
     [Fact]
+    public async Task A_rerun_adds_its_attempt_to_the_same_folder_and_run_log_gets_a_second_summary()
+    {
+        var b = NewBatch(new BatchSettings(), "1.sql");
+        Script("1.sql", 2, ScriptStatus.Failed, error: "boom");
+        list.Run(b.Id);
+        await Until(b.Id, r => r.Scripts[0].Status == ScriptStatus.Running);
+        time.Advance(TimeSpan.FromSeconds(2));
+        await Until(b.Id, Ended);
+
+        Script("1.sql", 3);
+        time.Advance(TimeSpan.FromSeconds(60));
+        list.Rerun(b.Id, "1.sql");
+        await Until(b.Id, r => r.Scripts[0].Status == ScriptStatus.Running);
+        time.Advance(TimeSpan.FromSeconds(3));
+        await Until(b.Id, Ended);
+
+        var folder = Assert.Single(Directory.GetDirectories(Path.Combine(appData, "logs")));
+        Assert.EndsWith(
+            """
+            1.sql,1,Failed,2026-10-09T14:00:00+02:00,2026-10-09T14:00:02+02:00,2.000,,boom,,
+            1.sql,2,Succeeded,2026-10-09T14:01:02+02:00,2026-10-09T14:01:05+02:00,3.000,,,,
+
+            """.ReplaceLineEndings("\r\n"),
+            File.ReadAllText(Path.Combine(folder, "summary.csv")));
+        var log = File.ReadAllText(Path.Combine(folder, "run.log"));
+        Assert.Contains("2026-10-09T14:01:02+02:00 1.sql #2: Started", log);
+        Assert.Equal(2, log.Split("Run ended:").Length - 1);
+        Assert.EndsWith("1.sql: Succeeded, attempts: 2" + Environment.NewLine, log);
+    }
+
+    [Fact]
     public async Task A_second_run_in_the_same_second_gets_the_suffix_2_then_3()
     {
         var b = NewBatch(new BatchSettings(), "1.sql");

@@ -115,15 +115,15 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         return b with { Dirty = false, Settings = settings, Scripts = Merge(scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)) };
     }
 
-    /// <summary>"Remove from list". The file stays on disk. False if no batch has this id.</summary>
+    /// <summary>"Remove from list". The file stays on disk. The run of the batch is cancelled. False if no batch has this id.</summary>
     public bool Remove(int id)
     {
+        CancelAll(id); // outside the lock: see Cancel
         lock (gate)
         {
             if (batches.RemoveAll(b => b.Id == id) == 0) return false;
             loaded.Remove(id);
-            // ponytail: Running scripts of a removed batch finish on their own; only the Queued ones stop. Cancel them when #8 adds cancel.
-            if (runs.Remove(id, out var run)) run.Queue.Clear();
+            runs.Remove(id);
             Publish(new Change("remove", new { id }));
             return true;
         }

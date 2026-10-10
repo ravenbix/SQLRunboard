@@ -60,7 +60,7 @@ public class BatchFileTests : AppPageTest
     public async Task Save_asks_to_overwrite_a_file_that_changed_on_disk()
     {
         var file = SaveOnServer("x");
-        await Page.ReloadAsync();
+        await OpenAsync(Page, App.Host.BaseUrl); // the page gets the batch that the test saved on the server
         File.WriteAllText(file, File.ReadAllText(file).Replace("\"recurse\": false", "\"recurse\": true"));
 
         await Page.Keyboard.PressAsync("ControlOrMeta+s");
@@ -75,7 +75,7 @@ public class BatchFileTests : AppPageTest
     public async Task Save_can_load_a_changed_file_again()
     {
         var file = SaveOnServer("x");
-        await Page.ReloadAsync();
+        await OpenAsync(Page, App.Host.BaseUrl); // the page gets the batch that the test saved on the server
         File.WriteAllText(file, File.ReadAllText(file).Replace("\"parallelLimit\": 4", "\"parallelLimit\": 7"));
 
         await Page.Keyboard.PressAsync("ControlOrMeta+s");
@@ -114,7 +114,7 @@ public class BatchFileTests : AppPageTest
     public async Task Remove_from_list_keeps_the_file()
     {
         var file = SaveOnServer("x");
-        await Page.ReloadAsync();
+        await OpenAsync(Page, App.Host.BaseUrl); // the page gets the batch that the test saved on the server
         await Expect(Side).ToHaveCountAsync(1);
 
         await Top("Remove from list").ClickAsync();

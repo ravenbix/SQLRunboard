@@ -68,6 +68,25 @@ public sealed class GuiHost : IAsyncDisposable
 
     record LockFile(Uri Url, string Token);
 
+    /// <summary>The start URL of the server in the lock file, or null when no server answers there with that token (a stale or missing lock file).</summary>
+    public static async Task<Uri?> FindRunningAsync(string appDataFolder)
+    {
+        try
+        {
+            var path = Path.Combine(appDataFolder, LockFileName);
+            if (!File.Exists(path)) return null;
+            if (JsonSerializer.Deserialize<LockFile>(File.ReadAllText(path), JsonSerializerOptions.Web) is not { Url: { } url, Token: { } token }) return null;
+            var startUrl = new Uri(url, "/?token=" + Uri.EscapeDataString(token));
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(3) };
+            using var res = await http.GetAsync(startUrl);
+            return res.StatusCode == HttpStatusCode.Redirect ? startUrl : null; // only our server with this token redirects
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or IOException or UriFormatException)
+        {
+            return null;
+        }
+    }
+
     // ponytail: check-then-write, so two starts in the same instant can both run. Add an OS file lock if that matters.
     void WriteLock()
     {

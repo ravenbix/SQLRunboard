@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.browser }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        browser: [chromium, firefox, webkit]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - run: dotnet build
+      # Playwright advises against caching the browsers.
+      - run: ./tests/SqlRunboard.Gui.Tests/bin/Debug/net10.0/playwright.ps1 install ${{ matrix.browser }} ${{ runner.os == 'Linux' && '--with-deps' || '' }}
+      - run: dotnet test --no-build
+        env:
+          BROWSER: ${{ matrix.browser }}

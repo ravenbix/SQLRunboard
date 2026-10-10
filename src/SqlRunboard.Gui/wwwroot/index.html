@@ -202,12 +202,10 @@ a[data-line] { color: inherit; text-decoration: underline; }
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const MOD = isMac ? '⌘' : 'Ctrl+';
 
-// ---------- settings.json stand-in ----------
-const store = {
-  get(k, d) { try { const v = localStorage.getItem('sqlrunboard-proto:' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem('sqlrunboard-proto:' + k, JSON.stringify(v)); } catch {} },
-};
-const app = { theme: store.get('theme', 'System'), view: store.get('view', 'board'), tlColumns: store.get('tlColumns', false), tlCollapse: store.get('tlCollapse', false), drawerWidth: store.get('drawerWidth', 360), batches: [], cur: null, dialog: null, menu: null };
+// ---------- app settings: settings.json in the app data folder. The snapshot gives them; each change goes to the server. ----------
+const PREFS = { theme: 'System', view: 'board', tlColumns: false, tlCollapse: false, drawerWidth: 360 };
+const store = { set(k, v) { sendEdit('/api/app-settings', { [k]: v }); } };
+const app = { ...PREFS, batches: [], cur: null, dialog: null, menu: null };
 // ---------- server state ----------
 // The server keeps all batch state. Each server batch merges into a page object that also keeps the view state (tab, selection, drawer).
 // The page uses the flat settings of the prototype; the server uses the batch file shape (target is nested).
@@ -241,7 +239,9 @@ async function post(url, body = {}) {
 function connect() {
   const es = new EventSource('/events');
   es.addEventListener('snapshot', e => {
-    const ids = JSON.parse(e.data).batches.map(sb => upsert(sb).id);
+    const snap = JSON.parse(e.data), ids = snap.batches.map(sb => upsert(sb).id);
+    for (const k in PREFS) if (k in snap.app) app[k] = snap.app[k];
+    applyTheme(); setDrawerWidth(app.drawerWidth);
     app.batches = app.batches.filter(b => ids.includes(b.id));
     if (!app.batches.some(b => b.id === app.cur)) app.cur = app.batches[0]?.id ?? null;
     document.documentElement.dataset.connected = ''; // tests wait for this

@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/sqlrunboard-desktop/sqlrunboard-desktop.csproj" />
     <Project Path="src/SqlRunboard.Core/SqlRunboard.Core.csproj" />
     <Project Path="src/SqlRunboard.Gui/SqlRunboard.Gui.csproj" />
     <Project Path="src/sqlrunboard/sqlrunboard.csproj" />

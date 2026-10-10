@@ -302,8 +302,10 @@ function runBatch(b) {
 }
 const cancel = (b, path) => sendEdit(`/api/batches/${b.id}/cancel`, { path });
 const cancelAll = b => sendEdit(`/api/batches/${b.id}/cancel-all`, {});
-const rerun = (b, path) => sendEdit(`/api/batches/${b.id}/rerun`, { path });
-const rerunFailed = b => sendEdit(`/api/batches/${b.id}/rerun-failed`, {});
+// A rerun after the run ended checks the logon first, as Run does. A rerun during the run uses the kept password.
+const afterLogon = (b, go) => b.run?.ended ? logon(b, go) : go();
+const rerun = (b, path) => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun`, { path }));
+const rerunFailed = b => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun-failed`, {}));
 function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
 // The folder, Open and Save as dialogs: the server lists the folders (and the batch files). kind: folder, open or saveAs.
 async function browse(b, path, kind = 'folder') {

@@ -30,5 +30,8 @@ public sealed record BatchSettings
     public BatchTarget Target { get; init; } = new();
 }
 
-/// <summary>One entry in the side list. File is null for an unsaved batch.</summary>
-public sealed record Batch(int Id, string Name, string? File, bool Dirty, BatchSettings Settings);
+/// <summary>One file of the batch. Path is relative to the folder, with /. Include false: a cleared check box.</summary>
+public sealed record ScriptEntry(string Path, bool Include);
+
+/// <summary>One entry in the side list. File is null for an unsaved batch. Scripts is the start order.</summary>
+public sealed record Batch(int Id, string Name, string? File, bool Dirty, BatchSettings Settings, IReadOnlyList<ScriptEntry> Scripts);

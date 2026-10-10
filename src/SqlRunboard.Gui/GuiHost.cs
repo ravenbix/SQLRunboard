@@ -69,6 +69,8 @@ public sealed class GuiHost : IAsyncDisposable
             : list.UpdateSettings(id, settings) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/include", (int id, IncludeRequest r, BatchList list) =>
             list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/run", (int id, BatchList list) =>
+            list.Run(id) is { } b ? Results.Ok(b) : Results.NotFound());
         // The browser has no folder picker that gives a path, so the page browses the folders here.
         app.MapPost("/api/folders", (FolderRequest r) =>
         {

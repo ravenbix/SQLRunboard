@@ -9,8 +9,11 @@ public sealed record SqlMessage(SqlMessageKind Kind, string Text);
 /// <summary>The target of the batch plus the password from the page. The page never gets this.</summary>
 public sealed record SqlConnectionSettings(BatchTarget Target, string? Password);
 
-/// <summary>One attempt of one script: the commands (the GO parts) to send on one new connection.</summary>
-public sealed record SqlExecution(string ScriptName, IReadOnlyList<string> Commands, SqlConnectionSettings Connection);
+/// <summary>
+/// One attempt of one script: the GO parts to send on one new connection, each part Repeat times, in order.
+/// The executor stops at the first failed part, and shows its error line as "line N (part M)": N = part.Line + server line - 1, M = 1-based index.
+/// </summary>
+public sealed record SqlExecution(string ScriptName, IReadOnlyList<ScriptPart> Parts, SqlConnectionSettings Connection);
 
 /// <summary>Status is Succeeded or Failed. A cancel throws OperationCanceledException.</summary>
 public sealed record SqlResult(ScriptStatus Status, long? Rows, string? Error);

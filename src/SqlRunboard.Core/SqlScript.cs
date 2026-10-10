@@ -8,6 +8,9 @@ public sealed record ScriptPart(string Text, int Repeat, int Line);
 /// <summary>The script reader and GO splitter.</summary>
 public static partial class SqlScript
 {
+    /// <summary>Reads the file (a UTF-8 or UTF-16 BOM selects the encoding, else UTF-8) and splits it.</summary>
+    public static IReadOnlyList<ScriptPart> Read(string path) => Split(File.ReadAllText(path));
+
     /// <summary>
     /// Splits on lines that hold only GO or GO n (any case, spaces and a -- comment after it), as SSMS does.
     /// GO inside a /* */ comment (nested too) or a '', "" or [] literal that continues across lines does not split.

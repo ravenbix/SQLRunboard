@@ -14,6 +14,7 @@ public sealed class BatchList
     readonly Lock gate = new();
     readonly List<Batch> batches = [];
     readonly List<Channel<Change>> subscribers = [];
+    readonly Dictionary<int, string> loaded = []; // batch id -> the file text that the app last read or wrote
     int lastId, lastUntitled;
 
     public Batch NewBatch()
@@ -42,6 +43,43 @@ public sealed class BatchList
     {
         lock (gate)
             return Replace(id, b => b with { Scripts = [.. b.Scripts.Select(s => s.Path == path ? s with { Include = include } : s)] });
+    }
+
+    /// <summary>
+    /// Writes the batch file. Path null: Save, to the current file. Otherwise Save as, to that full path; the app adds .sqlrunboard.json if it is not there.
+    /// Throws BatchFileChangedException if the file on disk is not the version that the app loaded, unless overwrite is true. Null if no batch has this id.
+    /// </summary>
+    public Batch? Save(int id, string? path, bool overwrite)
+    {
+        if (path is not null && !Path.IsPathFullyQualified(path)) throw new ArgumentException($"Type a full path: {path}");
+        lock (gate)
+        {
+            var i = batches.FindIndex(b => b.Id == id);
+            if (i < 0) return null;
+            var b = batches[i];
+            var file = path is null ? b.File ?? throw new ArgumentException("The batch has no file. Use Save as.")
+                : BatchFile.HasExtension(path) ? Path.GetFullPath(path) : Path.GetFullPath(path + BatchFile.Extension);
+            // ponytail: Save as over another existing file overwrites it without a question; ask first if users lose files that way.
+            if (!overwrite && file == b.File && File.Exists(file) && File.ReadAllText(file) != loaded.GetValueOrDefault(id)) throw new BatchFileChangedException(file);
+            var settings = b.Settings with { Folder = Rebase(b.File, file, b.Settings.Folder) };
+            var text = BatchFile.Format(settings, b.Scripts);
+            File.WriteAllText(file, text);
+            loaded[id] = text;
+            var batch = batches[i] = b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings };
+            Publish(new Change("batch", batch));
+            return batch;
+        }
+    }
+
+    /// <summary>
+    /// The folder for a batch file at newFile. A relative folder (or any folder of an unsaved batch) becomes relative to newFile, with /.
+    /// It stays absolute if no relative path is possible (another Windows drive). An absolute folder of a saved batch is your choice and stays.
+    /// </summary>
+    static string? Rebase(string? oldFile, string newFile, string? folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || (oldFile is not null && Path.IsPathRooted(folder))) return folder;
+        var rel = Path.GetRelativePath(Path.GetDirectoryName(newFile)!, Path.GetFullPath(FolderPath(oldFile, folder)!));
+        return Path.IsPathRooted(rel) ? rel : rel.Replace('\\', '/');
     }
 
     // Call under the lock.

@@ -65,7 +65,7 @@ public sealed class GuiHost : IAsyncDisposable
         app.MapGet("/events", (BatchList list, CancellationToken ct) => TypedResults.ServerSentEvents(Events(list, ct)));
         app.MapPost("/api/batches", (BatchList list) => list.NewBatch());
         app.MapPost("/api/batches/{id:int}/settings", (int id, BatchSettings settings, BatchList list) =>
-            settings is not { ParallelLimit: >= 1 and <= 64, TimeoutSeconds: null or >= 1, Filters: not null, Target: not null } ? Results.BadRequest()
+            !settings.IsValid ? Results.BadRequest()
             : list.UpdateSettings(id, settings) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/include", (int id, IncludeRequest r, BatchList list) =>
             list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());

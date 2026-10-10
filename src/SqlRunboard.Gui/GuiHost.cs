@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -52,6 +53,7 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.AddSingleton(options.Executor);
         builder.Services.AddSingleton(options.Time);
         builder.Services.AddSingleton<BatchList>();
+        builder.Services.AddSingleton<AppSettings>();
         builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
         var app = builder.Build();
@@ -62,7 +64,13 @@ public sealed class GuiHost : IAsyncDisposable
         app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
 
         // Server to page: SSE. Page to server: POST with a JSON body, one route per command.
-        app.MapGet("/events", (BatchList list, CancellationToken ct) => TypedResults.ServerSentEvents(Events(list, ct)));
+        app.MapGet("/events", (BatchList list, AppSettings settings, CancellationToken ct) => TypedResults.ServerSentEvents(Events(list, settings, ct)));
+        app.MapPost("/api/app-settings", (JsonNode? changes, AppSettings settings) =>
+        {
+            if (changes is not JsonObject o) return Results.BadRequest();
+            settings.Merge(o);
+            return Results.NoContent();
+        });
         app.MapPost("/api/batches", (BatchList list) => list.NewBatch());
         app.MapPost("/api/batches/{id:int}/settings", (int id, BatchSettings settings, BatchList list) =>
             settings is not { ParallelLimit: >= 1 and <= 64, TimeoutSeconds: null or >= 1, Filters: not null, Target: not null } ? Results.BadRequest()
@@ -118,10 +126,10 @@ public sealed class GuiHost : IAsyncDisposable
         JsonSerializer.Serialize(stream, new LockFile(BaseUrl, Token), JsonSerializerOptions.Web);
     }
 
-    static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, [EnumeratorCancellation] CancellationToken ct)
+    static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, AppSettings settings, [EnumeratorCancellation] CancellationToken ct)
     {
         using var sub = list.Subscribe();
-        yield return new SseItem<object>(new { batches = sub.Snapshot }, "snapshot");
+        yield return new SseItem<object>(new { batches = sub.Snapshot, app = settings.Snapshot() }, "snapshot");
         await foreach (var change in sub.Changes.ReadAllAsync(ct))
             yield return new SseItem<object>(change.Data, change.Kind);
     }
@@ -175,5 +183,37 @@ public sealed class GuiHost : IAsyncDisposable
     {
         await app.StopAsync();
         await app.DisposeAsync();
+    }
+}
+
+/// <summary>
+/// The app settings of the page (for example the last Run tab view), in <c>settings.json</c> in the app data folder.
+/// The page owns the names and values. A POST changes only the names that it sends. The batch file does not keep them.
+/// </summary>
+public sealed class AppSettings(GuiHostOptions options)
+{
+    public const string FileName = "settings.json";
+    readonly string path = Path.Combine(options.AppDataFolder, FileName);
+    readonly Lock gate = new();
+    JsonObject? values;
+
+    public JsonObject Snapshot() { lock (gate) return (JsonObject)Load().DeepClone(); }
+
+    public void Merge(JsonObject changes)
+    {
+        lock (gate)
+        {
+            var v = Load();
+            foreach (var (name, value) in changes) v[name] = value?.DeepClone();
+            File.WriteAllText(path, v.ToJsonString());
+        }
+    }
+
+    JsonObject Load()
+    {
+        if (values is null)
+            try { values = JsonNode.Parse(File.ReadAllText(path)) as JsonObject; }
+            catch (Exception e) when (e is IOException or JsonException) { } // missing or bad file: start empty
+        return values ??= [];
     }
 }

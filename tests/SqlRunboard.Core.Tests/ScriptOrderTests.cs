@@ -100,5 +100,19 @@ public sealed class ScriptOrderTests : IDisposable
         Assert.NotEqual(ScriptState.Missing, list.UpdateSettings(b.Id, b.Settings)!.Scripts.Single().State);
     }
 
+    [Fact]
+    public async Task The_side_list_moves_batches_with_the_same_commands()
+    {
+        int a = list.NewBatch().Id, b = list.NewBatch().Id, c = list.NewBatch().Id;
+        using var sub = list.Subscribe();
+
+        Assert.True(list.MoveBatch(c, MoveTo.Top));
+
+        Assert.Equal("order", (await sub.Changes.ReadAsync(TestContext.Current.CancellationToken)).Kind);
+        using var after = list.Subscribe();
+        Assert.Equal([c, a, b], after.Snapshot.Select(x => x.Id));
+        Assert.False(list.MoveBatch(99, MoveTo.Up));
+    }
+
     public void Dispose() => Directory.Delete(root, recursive: true);
 }

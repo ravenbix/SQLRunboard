@@ -66,6 +66,17 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         }
     }
 
+    /// <summary>Moves a batch in the side list. SSE event "order" with the ids in the new order. False if no batch has this id.</summary>
+    public bool MoveBatch(int id, MoveTo to)
+    {
+        lock (gate)
+        {
+            if (Find(id) is null) return false;
+            if (MoveIn(batches, b => b.Id == id, to)) Publish(new Change("order", new { ids = batches.Select(b => b.Id).ToArray() }));
+            return true;
+        }
+    }
+
     /// <summary>"Sort by file name": the start order becomes the natural sort. Null if no batch has this id.</summary>
     public Batch? SortByFileName(int id)
     {

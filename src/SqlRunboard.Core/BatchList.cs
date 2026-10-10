@@ -66,6 +66,13 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         }
     }
 
+    /// <summary>"Sort by file name": the start order becomes the natural sort. Null if no batch has this id.</summary>
+    public Batch? SortByFileName(int id)
+    {
+        lock (gate)
+            return Replace(id, b => b with { Scripts = [.. b.Scripts.OrderBy(s => s.Path, FileScan.NaturalOrder).ThenBy(s => s.Path, StringComparer.Ordinal)] });
+    }
+
     /// <summary>Moves the first match. False if there is no match or it is already at that end.</summary>
     static bool MoveIn<T>(List<T> list, Predicate<T> match, MoveTo to)
     {
@@ -95,10 +102,12 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
             // ponytail: Save as over another existing file overwrites it without a question; ask first if users lose files that way.
             if (!overwrite && file == b.File && File.Exists(file) && File.ReadAllText(file) != loaded.GetValueOrDefault(id)) throw new BatchFileChangedException(file);
             var settings = b.Settings with { Folder = Rebase(b.File, file, b.Settings.Folder) };
-            var text = BatchFile.Format(settings, b.Scripts);
+            // Save removes the Missing entries and clears the New marks.
+            List<ScriptEntry> scripts = [.. b.Scripts.Where(s => s.State != ScriptState.Missing).Select(s => s with { State = null })];
+            var text = BatchFile.Format(settings, scripts);
             File.WriteAllText(file, text);
             loaded[id] = text;
-            var batch = batches[i] = b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings };
+            var batch = batches[i] = b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings, Scripts = scripts };
             Publish(new Change("batch", batch));
             return batch;
         }
@@ -198,7 +207,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
             var scripts = Merge(b.Scripts, FileScan.Scan(folder, b.Settings.Filters, b.Settings.Recurse));
             batches[i] = b with { Scripts = scripts, Dirty = b.Dirty || !scripts.SequenceEqual(b.Scripts) };
             var run = runs[id] = new ActiveRun(time.GetUtcNow(), folder ?? "", b.Settings);
-            foreach (var s in scripts.Where(s => s.Include))
+            foreach (var s in scripts.Where(s => s.Include && s.State != ScriptState.Missing))
             {
                 run.Scripts[s.Path] = new ScriptRun(s.Path, ScriptStatus.Queued, []);
                 run.Queue.Add(s.Path);
@@ -316,12 +325,16 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
     static string? FolderPath(string? batchFile, string? folder) =>
         string.IsNullOrWhiteSpace(folder) || batchFile is null ? folder : Path.Combine(Path.GetDirectoryName(batchFile)!, folder);
 
-    /// <summary>Known files keep their place and check box; new files go at the bottom in file-name order. Files not on disk drop out.</summary>
+    /// <summary>
+    /// Known files keep their place and check box; new files go at the bottom in file-name order, marked New.
+    /// Files not on disk stay, marked Missing, until the next save.
+    /// </summary>
     static IReadOnlyList<ScriptEntry> Merge(IReadOnlyList<ScriptEntry> known, IReadOnlyList<string> found)
     {
         var onDisk = found.ToHashSet(StringComparer.Ordinal);
         var old = known.Select(s => s.Path).ToHashSet(StringComparer.Ordinal);
-        return [.. known.Where(s => onDisk.Contains(s.Path)), .. found.Where(p => !old.Contains(p)).Select(p => new ScriptEntry(p, Include: true))];
+        return [.. known.Select(s => !onDisk.Contains(s.Path) ? s with { State = ScriptState.Missing } : s.State == ScriptState.Missing ? s with { State = null } : s),
+            .. found.Where(p => !old.Contains(p)).Select(p => new ScriptEntry(p, Include: true, ScriptState.New))];
     }
 
     /// <summary>The snapshot and the subscription are taken under one lock, so no change is lost between them.</summary>

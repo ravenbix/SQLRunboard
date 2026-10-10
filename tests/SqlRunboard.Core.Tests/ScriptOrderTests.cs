@@ -57,5 +57,48 @@ public sealed class ScriptOrderTests : IDisposable
         Assert.Equal(["d.sql", "b.sql", "c.sql"], list.Move(b.Id, "a.sql", MoveTo.Bottom)!.Run!.Queue);
     }
 
+    [Fact]
+    public void Sort_by_file_name_resets_the_order_to_the_natural_sort()
+    {
+        var b = NewBatch(4, "2_x.sql", "10_x.sql", "1_x.sql");
+        list.Move(b.Id, "1_x.sql", MoveTo.Bottom);
+        list.SetInclude(b.Id, "2_x.sql", false);
+
+        var sorted = list.SortByFileName(b.Id)!;
+
+        Assert.Equal([("1_x.sql", true), ("2_x.sql", false), ("10_x.sql", true)], sorted.Scripts.Select(s => (s.Path, s.Include)));
+    }
+
+    [Fact]
+    public void A_new_file_is_marked_New_and_a_missing_file_stays_with_a_warning_until_the_next_save()
+    {
+        var b = NewBatch(4, "a.sql", "b.sql");
+        list.Save(b.Id, Path.Combine(root, "x"), overwrite: false);
+        Touch("d.sql", "c.sql");
+        File.Delete(Path.Combine(root, "a.sql"));
+
+        var scanned = list.Run(b.Id)!;
+
+        Assert.Equal([new("a.sql", true, ScriptState.Missing), new("b.sql", true), new("c.sql", true, ScriptState.New), new("d.sql", true, ScriptState.New)], scanned.Scripts);
+        Assert.Equal(["b.sql", "c.sql", "d.sql"], scanned.Run!.Scripts.Select(s => s.Path)); // a missing file does not run
+
+        var saved = list.Save(b.Id, null, overwrite: false)!;
+
+        Assert.Equal([new("b.sql", true), new("c.sql", true), new("d.sql", true)], saved.Scripts);
+        Assert.DoesNotContain("a.sql", File.ReadAllText(saved.File!));
+        Assert.DoesNotContain("state", File.ReadAllText(saved.File!));
+    }
+
+    [Fact]
+    public void A_missing_file_that_comes_back_loses_its_warning()
+    {
+        var b = NewBatch(4, "a.sql");
+        File.Move(Path.Combine(root, "a.sql"), Path.Combine(root, "a.bak"));
+        Assert.Equal(ScriptState.Missing, list.UpdateSettings(b.Id, b.Settings)!.Scripts.Single().State);
+        File.Move(Path.Combine(root, "a.bak"), Path.Combine(root, "a.sql"));
+
+        Assert.NotEqual(ScriptState.Missing, list.UpdateSettings(b.Id, b.Settings)!.Scripts.Single().State);
+    }
+
     public void Dispose() => Directory.Delete(root, recursive: true);
 }

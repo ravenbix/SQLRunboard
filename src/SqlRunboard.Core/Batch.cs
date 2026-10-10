@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace SqlRunboard.Core;
 
 public enum Auth { Integrated, SqlServer, EntraInteractive, EntraDefault }
@@ -33,8 +35,13 @@ public sealed record BatchSettings
     public bool IsValid => this is { ParallelLimit: >= 1 and <= 64, TimeoutSeconds: null or >= 1, Filters: not null, Target: not null };
 }
 
-/// <summary>One file of the batch. Path is relative to the folder, with /. Include false: a cleared check box.</summary>
-public sealed record ScriptEntry(string Path, bool Include);
+/// <summary>
+/// One file of the batch. Path is relative to the folder, with /. Include false: a cleared check box.
+/// State: New or Missing until the next save (docs/SPEC.md "Script order"). The batch file never has it.
+/// </summary>
+public sealed record ScriptEntry(string Path, bool Include, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ScriptState? State = null);
+
+public enum ScriptState { New, Missing }
 
 /// <summary>One entry in the side list. File is null for an unsaved batch. Scripts is the start order. Run is the current run, or null.</summary>
 public sealed record Batch(int Id, string Name, string? File, bool Dirty, BatchSettings Settings, IReadOnlyList<ScriptEntry> Scripts, RunState? Run = null);

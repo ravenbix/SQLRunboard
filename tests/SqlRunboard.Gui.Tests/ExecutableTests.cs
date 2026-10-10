@@ -6,6 +6,15 @@ public class ExecutableTests
     static readonly CancellationToken Ct = TestContext.Current.CancellationToken;
 
     [Fact]
+    public void The_browser_executable_has_no_native_UI_dependency()
+    {
+        var deps = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "sqlrunboard.deps.json"));
+
+        Assert.DoesNotContain("Avalonia", deps, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("WebView", deps, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Starts_the_server_in_the_given_app_data_folder_without_a_browser_and_prints_the_start_url()
     {
         var appData = Path.Combine(Path.GetTempPath(), "sqlrunboard-exe-" + Guid.NewGuid().ToString("N"));

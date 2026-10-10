@@ -28,6 +28,8 @@ public sealed record PathRequest(string Path);
 /// <param name="Path">Null: Save to the current file. Otherwise Save as.</param>
 public sealed record SaveRequest(string? Path, bool Overwrite);
 public sealed record ScriptRequest(string Path);
+public sealed record MoveRequest(string Path, MoveTo To);
+public sealed record MoveBatchRequest(MoveTo To);
 
 /// <summary>The local web server: Kestrel on 127.0.0.1, a random port, a random token. See docs/SPEC.md "GUI host".</summary>
 public sealed class GuiHost : IAsyncDisposable
@@ -82,6 +84,12 @@ public sealed class GuiHost : IAsyncDisposable
             list.Cancel(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/cancel-all", (int id, BatchList list) =>
             list.CancelAll(id) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/move", (int id, MoveRequest r, BatchList list) =>
+            list.Move(id, r.Path, r.To) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/sort", (int id, BatchList list) =>
+            list.SortByFileName(id) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/move-in-list", (int id, MoveBatchRequest r, BatchList list) =>
+            list.MoveBatch(id, r.To) ? Results.Ok(new { }) : Results.NotFound());
         app.MapPost("/api/batches/open", (PathRequest r, BatchList list) => FileResult(() => list.Open(r.Path)));
         app.MapPost("/api/batches/{id:int}/save", (int id, SaveRequest r, BatchList list) => FileResult(() => list.Save(id, r.Path, r.Overwrite)));
         app.MapPost("/api/batches/{id:int}/reload", (int id, BatchList list) => FileResult(() => list.Reload(id)));

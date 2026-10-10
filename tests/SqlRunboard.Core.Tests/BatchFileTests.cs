@@ -115,5 +115,83 @@ public sealed class BatchFileTests : IDisposable
         Assert.Equal(other, list.Save(b.Id, null, overwrite: false)!.Settings.Folder);
     }
 
+    [Fact]
+    public void Open_reads_the_settings_and_the_start_order_with_the_cleared_check_boxes()
+    {
+        Touch("scripts/a.sql", "scripts/b.sql", "scripts/c.sql");
+        File.WriteAllText(Path.Combine(root, "deploy.sqlrunboard.json"), """
+            {
+              "version": 1,
+              "folder": "scripts",
+              "parallelLimit": 2,
+              "target": { "server": "sql01", "auth": "SqlServer" },
+              "scripts": [
+                { "path": "c.sql", "include": true },
+                { "path": "a.sql", "include": false },
+                { "path": "b.sql", "include": true }
+              ]
+            }
+            """);
+
+        var b = list.Open(Path.Combine(root, "deploy.sqlrunboard.json"));
+
+        Assert.Equal("deploy", b.Name);
+        Assert.False(b.Dirty);
+        Assert.Equal(2, b.Settings.ParallelLimit);
+        Assert.Equal("*.sql", b.Settings.Filters);
+        Assert.Equal(Auth.SqlServer, b.Settings.Target.Auth);
+        Assert.Equal([new("c.sql", true), new("a.sql", false), new("b.sql", true)], b.Scripts);
+    }
+
+    [Fact]
+    public void Opening_a_file_that_is_in_the_list_gives_the_existing_entry()
+    {
+        var saved = list.Save(list.NewBatch().Id, Path.Combine(root, "x"), overwrite: false)!;
+
+        var opened = list.Open(Path.Combine(root, "sub", "..", "x.sqlrunboard.json"));
+
+        Assert.Equal(saved.Id, opened.Id);
+        using var sub = list.Subscribe();
+        Assert.Single(sub.Snapshot);
+    }
+
+    [Fact]
+    public void Open_accepts_only_batch_files()
+    {
+        File.WriteAllText(Path.Combine(root, "x.json"), "{}");
+        File.WriteAllText(Path.Combine(root, "bad.sqlrunboard.json"), """{ "version": 2 }""");
+
+        Assert.Throws<ArgumentException>(() => list.Open(Path.Combine(root, "x.json")));
+        Assert.Throws<InvalidDataException>(() => list.Open(Path.Combine(root, "bad.sqlrunboard.json")));
+        Assert.Throws<FileNotFoundException>(() => list.Open(Path.Combine(root, "none.sqlrunboard.json")));
+    }
+
+    [Fact]
+    public void Load_again_replaces_the_batch_with_the_file_on_disk()
+    {
+        var b = list.Save(list.NewBatch().Id, Path.Combine(root, "x"), overwrite: false)!;
+        list.UpdateSettings(b.Id, b.Settings with { ParallelLimit = 9 });
+        File.WriteAllText(b.File!, File.ReadAllText(b.File!).Replace("\"parallelLimit\": 4", "\"parallelLimit\": 7"));
+
+        var reloaded = list.Reload(b.Id)!;
+
+        Assert.Equal(7, reloaded.Settings.ParallelLimit);
+        Assert.False(reloaded.Dirty);
+        Assert.NotNull(list.Save(b.Id, null, overwrite: false)); // the loaded version is now the disk version
+    }
+
+    [Fact]
+    public void Remove_takes_the_batch_off_the_list_and_keeps_the_file()
+    {
+        var b = list.Save(list.NewBatch().Id, Path.Combine(root, "x"), overwrite: false)!;
+
+        Assert.True(list.Remove(b.Id));
+
+        using var sub = list.Subscribe();
+        Assert.Empty(sub.Snapshot);
+        Assert.True(File.Exists(b.File));
+        Assert.False(list.Remove(b.Id));
+    }
+
     public void Dispose() => Directory.Delete(root, recursive: true);
 }

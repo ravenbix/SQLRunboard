@@ -72,6 +72,60 @@ public sealed class BatchList
     }
 
     /// <summary>
+    /// Adds a batch file to the list, or gives the entry that already has this file. The path must be full and end with .sqlrunboard.json.
+    /// Throws FileNotFoundException, or InvalidDataException for an incorrect file.
+    /// </summary>
+    public Batch Open(string path)
+    {
+        if (!Path.IsPathFullyQualified(path) || !BatchFile.HasExtension(path)) throw new ArgumentException($"Select a full path to a {BatchFile.Extension} file: {path}");
+        var file = Path.GetFullPath(path);
+        lock (gate)
+        {
+            // ponytail: an ordinal path compare; the same file with another letter case on Windows or macOS gets a second entry.
+            if (batches.Find(b => b.File == file) is { } open) return open;
+            var batch = Load(new Batch(++lastId, BatchFile.NameOf(file), file, Dirty: false, new BatchSettings(), Scripts: []));
+            batches.Add(batch);
+            Publish(new Change("batch", batch));
+            return batch;
+        }
+    }
+
+    /// <summary>"Load again": replaces the batch with its file on disk. Null if no batch has this id.</summary>
+    public Batch? Reload(int id)
+    {
+        lock (gate)
+        {
+            var i = batches.FindIndex(b => b.Id == id);
+            if (i < 0) return null;
+            if (batches[i].File is null) throw new ArgumentException("The batch has no file.");
+            var batch = batches[i] = Load(batches[i]);
+            Publish(new Change("batch", batch));
+            return batch;
+        }
+    }
+
+    // Call under the lock. Reads b.File and scans its folder.
+    Batch Load(Batch b)
+    {
+        var text = File.ReadAllText(b.File!);
+        var (settings, scripts) = BatchFile.Parse(text);
+        loaded[b.Id] = text;
+        return b with { Dirty = false, Settings = settings, Scripts = Merge(scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)) };
+    }
+
+    /// <summary>"Remove from list". The file stays on disk. False if no batch has this id.</summary>
+    public bool Remove(int id)
+    {
+        lock (gate)
+        {
+            if (batches.RemoveAll(b => b.Id == id) == 0) return false;
+            loaded.Remove(id);
+            Publish(new Change("remove", new { id }));
+            return true;
+        }
+    }
+
+    /// <summary>
     /// The folder for a batch file at newFile. A relative folder (or any folder of an unsaved batch) becomes relative to newFile, with /.
     /// It stays absolute if no relative path is possible (another Windows drive). An absolute folder of a saved batch is your choice and stays.
     /// </summary>

@@ -36,19 +36,21 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         lock (gate)
         {
             // ponytail: the scan runs under the lock; move it out if a slow network folder blocks the page.
-            return Replace(id, b =>
-            {
-                var run = b.Run;
-                if (run is { Ended: false } && EndsRun(b.Settings, settings) && runs.Remove(id)) run = run with { Ended = true };
-                return b with { Settings = settings, Scripts = Merge(b.Scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)), Run = run };
-            });
+            return Replace(id, b => b with { Settings = settings, Scripts = Merge(b.Scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)), Run = EndRun(b, settings) });
         }
     }
 
-    /// <summary>A change to the target or the file scan ends the current run. The other settings apply to the next reruns.</summary>
-    static bool EndsRun(BatchSettings a, BatchSettings b) =>
-        a.Target with { PasswordVariable = null } != b.Target with { PasswordVariable = null }
-        || (a.Folder, a.Filters, a.Recurse) != (b.Folder, b.Filters, b.Recurse);
+    /// <summary>
+    /// Call under the lock. A change to the target or the file scan ends the current run: reruns do nothing until the next Run.
+    /// The other settings apply to the next reruns. A run with Queued or Running scripts does not end.
+    /// </summary>
+    RunState? EndRun(Batch b, BatchSettings settings)
+    {
+        var (a, run) = (b.Settings, b.Run);
+        var ends = a.Target with { PasswordVariable = null } != settings.Target with { PasswordVariable = null }
+            || (a.Folder, a.Filters, a.Recurse) != (settings.Folder, settings.Filters, settings.Recurse);
+        return ends && run is { Ended: false, Active: false } && runs.Remove(b.Id) ? run with { Ended = true } : run;
+    }
 
     /// <summary>Sets or clears the check box of one file. Null if no batch has this id.</summary>
     public Batch? SetInclude(int id, string path, bool include)
@@ -122,7 +124,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         var text = File.ReadAllText(b.File!);
         var (settings, scripts) = BatchFile.Parse(text);
         loaded[b.Id] = text;
-        return b with { Dirty = false, Settings = settings, Scripts = Merge(scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)) };
+        return b with { Dirty = false, Settings = settings, Scripts = Merge(scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)), Run = EndRun(b, settings) };
     }
 
     /// <summary>"Remove from list". The file stays on disk. The run of the batch is cancelled. False if no batch has this id.</summary>

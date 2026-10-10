@@ -331,6 +331,21 @@ public sealed class RunTests : IDisposable
         Assert.All(next.Scripts, x => Assert.Single(x.Attempts));
     }
 
+    [Fact]
+    public async Task Load_again_with_another_target_ends_the_run()
+    {
+        var b = NewBatch(4, "a.sql");
+        list.Run(b.Id);
+        await Until(b.Id, r => !r.Active);
+        var file = Path.Combine(root, "x.sqlrunboard.json");
+        b = list.Save(b.Id, file, overwrite: false)!;
+        Assert.False(list.Reload(b.Id)!.Run!.Ended); // the same settings: the run continues
+
+        File.WriteAllText(file, BatchFile.Format(b.Settings with { Target = b.Settings.Target with { Server = "other" } }, b.Scripts));
+
+        Assert.True(list.Reload(b.Id)!.Run!.Ended);
+    }
+
     public void Dispose()
     {
         sub.Dispose();

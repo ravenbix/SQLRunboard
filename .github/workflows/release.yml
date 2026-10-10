@@ -1,0 +1,77 @@
+name: Release
+
+# Push a tag such as v0.1.0 to publish a release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: publish (${{ matrix.rid }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rid: win-x64, os: windows-latest }
+          # macOS runner: the SDK gives the apphost an ad-hoc signature, which Apple silicon needs.
+          - { rid: osx-arm64, os: macos-latest }
+          - { rid: linux-x64, os: ubuntu-latest }
+          - { rid: linux-arm64, os: ubuntu-latest }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Publish and pack
+        run: |
+          $rid = '${{ matrix.rid }}'
+          $out = "publish/$rid"
+          foreach ($project in 'sqlrunboard', 'sqlrunboard-desktop') {
+            dotnet publish "src/$project" -c Release -r $rid --self-contained `
+              -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o $out
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          # Pack only the two executables (the win-x64 output also has native .pdb files).
+          $ext = $rid.StartsWith('win') ? '.exe' : ''
+          $files = "sqlrunboard$ext", "sqlrunboard-desktop$ext"
+          $name = "sqlrunboard-${{ github.ref_name }}-$rid"
+          # tar keeps the Unix execute bit. Windows users expect a zip.
+          if ($ext) { Compress-Archive -Path ($files | ForEach-Object { "$out/$_" }) -DestinationPath "$name.zip" }
+          else { tar -czf "$name.tar.gz" -C $out @files }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: sqlrunboard-*
+          if-no-files-found: error
+
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @'
+          Each archive contains `sqlrunboard` (opens the GUI in your browser) and `sqlrunboard-desktop` (opens the GUI in its own window). The executables are self-contained: you do not need to install .NET.
+
+          The executables are not code signed.
+
+          - macOS: the system quarantines downloaded files. After you extract the archive, run `xattr -d com.apple.quarantine sqlrunboard sqlrunboard-desktop` in the folder.
+          - Windows: SmartScreen can show "Windows protected your PC". Click "More info", then "Run anyway".
+          - Linux: `sqlrunboard-desktop` needs WebKitGTK (for example `libwebkit2gtk-4.1-0`) on the computer.
+          '@
+          gh release create '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}' --title '${{ github.ref_name }}' --notes $notes --generate-notes

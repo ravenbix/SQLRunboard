@@ -177,6 +177,36 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         }
     }
 
+    /// <summary>
+    /// Cancels one script of the current run. A Queued script changes to Cancelled with 0 attempts. A Running script
+    /// changes to Cancelled when its executor stops. Returns the batch, or null if no batch has this id.
+    /// </summary>
+    public Batch? Cancel(int id, string path) => Cancel(id, _ => [path]);
+
+    /// <summary>Cancels all Running and Queued scripts of the current run. Null if no batch has this id.</summary>
+    public Batch? CancelAll(int id) => Cancel(id, run => [.. run.Queue, .. run.Tokens.Keys]);
+
+    Batch? Cancel(int id, Func<ActiveRun, IReadOnlyList<string>> paths)
+    {
+        List<CancellationTokenSource> stop = [];
+        Batch? batch;
+        lock (gate)
+        {
+            if (runs.GetValueOrDefault(id) is { } run)
+            {
+                foreach (var path in paths(run))
+                    if (run.Queue.Remove(path)) run.Scripts[path] = run.Scripts[path] with { Status = ScriptStatus.Cancelled };
+                    else if (run.Tokens.TryGetValue(path, out var cts) && run.Cancelled.Add(path)) stop.Add(cts);
+                Pump(id, run);
+            }
+            batch = Find(id);
+        }
+        // Outside the lock: a real executor can block while it tells the server to stop.
+        foreach (var cts in stop)
+            try { cts.Cancel(); } catch (ObjectDisposedException) { } // the script ended first
+        return batch;
+    }
+
     /// <summary>The mutable state of a run. Change it only under the lock.</summary>
     sealed class ActiveRun(DateTimeOffset start, string folder, BatchSettings settings)
     {
@@ -186,8 +216,17 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         public OrderedDictionary<string, ScriptRun> Scripts { get; } = new(StringComparer.Ordinal); // the start order
         public List<string> Queue { get; } = [];
         public int Running { get; set; }
+        public HashSet<string> Cancelled { get; } = new(StringComparer.Ordinal); // Running scripts that you cancelled: not a timeout
+        public Dictionary<string, CancellationTokenSource> Tokens { get; } = new(StringComparer.Ordinal); // one per Running script
 
         public void Add(string path, Attempt a) { var s = Scripts[path]; Scripts[path] = s with { Status = a.Status, Attempts = [.. s.Attempts, a] }; }
+        /// <summary>"Stop the queue at the first failure": no new scripts start. The Running scripts continue.</summary>
+        public void Failed()
+        {
+            if (!settings.StopOnFirstFailure) return;
+            foreach (var path in Queue) Scripts[path] = Scripts[path] with { Status = ScriptStatus.Cancelled, Error = "Not started: the queue stopped" };
+            Queue.Clear();
+        }
         public void SetLast(string path, Attempt a) { var s = Scripts[path]; Scripts[path] = s with { Status = a.Status, Attempts = [.. s.Attempts.SkipLast(1), a] }; }
     }
 
@@ -206,13 +245,15 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 run.Add(path, new Attempt(start, start, ScriptStatus.Failed, null, e is FileNotFoundException or DirectoryNotFoundException ? "File not found" : e.Message));
+                run.Failed();
                 continue;
             }
             run.Running++;
             run.Add(path, new Attempt(start, null, ScriptStatus.Running, null, null));
             var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, Password: null));
             // The continuation runs on the thread pool, never inline here under the lock.
-            _ = executor.ExecuteAsync(execution, _ => { }, CancellationToken.None)
+            var cts = run.Tokens[path] = run.Settings.TimeoutSeconds is int s ? new CancellationTokenSource(TimeSpan.FromSeconds(s), time) : new CancellationTokenSource();
+            _ = executor.ExecuteAsync(execution, _ => { }, cts.Token)
                 .ContinueWith(t => Finish(id, run, path, start, t), TaskScheduler.Default);
         }
         var i = batches.FindIndex(b => b.Id == id);
@@ -226,13 +267,19 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         lock (gate)
         {
             var end = time.GetUtcNow();
+            if (run.Tokens.Remove(path, out var cts)) cts.Dispose();
+            var cancelled = run.Cancelled.Remove(path);
             run.SetLast(path, t.IsCompletedSuccessfully ? new Attempt(start, end, t.Result.Status, t.Result.Rows, t.Result.Error)
-                : t.IsCanceled ? new Attempt(start, end, ScriptStatus.Cancelled, null, null)
+                : t.IsCanceled && cancelled ? new Attempt(start, end, ScriptStatus.Cancelled, null, null)
+                : t.IsCanceled ? new Attempt(start, end, ScriptStatus.Failed, null, $"Timeout after {run.Settings.TimeoutSeconds} s")
                 : new Attempt(start, end, ScriptStatus.Failed, null, t.Exception!.GetBaseException().Message));
             run.Running--;
+            if (run.Scripts[path].Status == ScriptStatus.Failed) run.Failed();
             Pump(id, run);
         }
     }
+
+    Batch? Find(int id) => batches.Find(b => b.Id == id);
 
     /// <summary>A relative folder is relative to the batch file. An unsaved batch has an absolute folder.</summary>
     static string? FolderPath(string? batchFile, string? folder) =>

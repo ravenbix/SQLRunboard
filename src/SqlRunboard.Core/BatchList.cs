@@ -122,6 +122,8 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         {
             if (batches.RemoveAll(b => b.Id == id) == 0) return false;
             loaded.Remove(id);
+            // ponytail: Running scripts of a removed batch finish on their own; only the Queued ones stop. Cancel them when #8 adds cancel.
+            if (runs.Remove(id, out var run)) run.Queue.Clear();
             Publish(new Change("remove", new { id }));
             return true;
         }

@@ -239,12 +239,13 @@ async function post(url, body = {}) {
   }
   return res.json();
 }
+// The side list in the server order. A batch that is not in ids drops out.
+const reorder = ids => { app.batches = ids.map(id => app.batches.find(b => b.id === id)).filter(Boolean); };
 // SSE: the full state first ("snapshot"), then one event per change. EventSource sends the auth cookie and reconnects by itself.
 function connect() {
   const es = new EventSource('/events');
   es.addEventListener('snapshot', e => {
-    const ids = JSON.parse(e.data).batches.map(sb => upsert(sb).id);
-    app.batches = app.batches.filter(b => ids.includes(b.id));
+    reorder(JSON.parse(e.data).batches.map(sb => upsert(sb).id));
     if (!app.batches.some(b => b.id === app.cur)) app.cur = app.batches[0]?.id ?? null;
     document.documentElement.dataset.connected = ''; // tests wait for this
     render();
@@ -252,6 +253,7 @@ function connect() {
   es.addEventListener('batch', e => { upsert(JSON.parse(e.data)); render(); });
   es.addEventListener('remove', e => dropBatch(JSON.parse(e.data).id));
   es.addEventListener('warning', e => { const w = JSON.parse(e.data); toast(`${app.batches.find(b => b.id === w.id)?.name ?? 'Batch'}: ${w.text}`); });
+  es.addEventListener('order', e => { reorder(JSON.parse(e.data).ids); render(); });
   es.onerror = () => { delete document.documentElement.dataset.connected; };
 }
 
@@ -259,19 +261,12 @@ function connect() {
 const DONE = ['Succeeded', 'Failed', 'Cancelled'];
 const lastA = r => r.attempts[r.attempts.length - 1];
 const firstStart = r => Math.min(...r.attempts.filter(a => a.start != null).map(a => a.start));
-function moveIn(arr, item, dir) {
-  const i = arr.indexOf(item); if (i < 0) return false;
-  arr.splice(i, 1);
-  const j = dir === 'top' ? 0 : dir === 'bottom' ? arr.length : dir === 'up' ? Math.max(0, i - 1) : Math.min(arr.length, i + 1);
-  arr.splice(j, 0, item); return i !== j;
-}
 const canMove = (b, path) => b.run ? !b.run.ended && b.run.rs[path]?.status === 'Queued' : !locked(b) && !!b.scripts.find(x => x.path === path);
 const locked = b => !!b.signing || !!(b.run && b.run.live && !b.run.ended);
 const canRerun = (b, r) => DONE.includes(r.status) && !b.signing && !b.run.stale; // stale: the settings changed, so the run ended
 
 // ponytail: stand-ins for the commands of later tickets. Each ticket replaces its names with a POST.
 const todo = () => toast('Not available yet.');
-const move = todo;
 // Edits go to the server one at a time, in the order you make them. queued() gives the error to the caller; sendEdit() shows it.
 let edits = Promise.resolve();
 function queued(url, body) { const p = edits.then(() => post(url, body)); edits = p.catch(() => null); return p; }
@@ -303,6 +298,9 @@ function runBatch(b) {
 }
 const cancel = (b, path) => sendEdit(`/api/batches/${b.id}/cancel`, { path });
 const cancelAll = b => sendEdit(`/api/batches/${b.id}/cancel-all`, {});
+// The server decides: during a run it moves a Queued script in the queue, otherwise it changes the start order. dir: up, down, top, bottom.
+const move = (b, path, dir) => path && sendEdit(`/api/batches/${b.id}/move`, { path, to: dir });
+const moveBatch = (b, dir) => sendEdit(`/api/batches/${b.id}/move-in-list`, { to: dir });
 // A rerun after the run ended checks the logon first, as Run does. A rerun during the run uses the kept password.
 const afterLogon = (b, go) => b.run?.ended ? logon(b, go) : go();
 const rerun = (b, path) => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun`, { path }));
@@ -714,7 +712,7 @@ function cmd(c, el) {
     case 'runlog': return todo();
     case 'test': return logon(b, r => { b.testMsg = `Connected. Server ${r.server}, database ${r.database}, login ${r.login}.`; });
     case 'browse': return browse(b, b.settings.folder);
-    case 'sortFiles': b.scripts.sort((x, y) => x.path.localeCompare(y.path, undefined, { numeric: true, sensitivity: 'base' })); b.dirty = true; return render();
+    case 'sortFiles': return sendEdit(`/api/batches/${b.id}/sort`, {});
   }
 }
 
@@ -742,7 +740,7 @@ document.addEventListener('click', e => {
   const dv = t.closest('[data-dview]'); if (dv) { b.dview = dv.dataset.dview; b.hlLine = null; return render(); }
   const ln = t.closest('[data-line]'); if (ln) { e.preventDefault(); b.dview = 'script'; b.hlLine = b.scrollLine = +ln.dataset.line; return render(); }
   const dm = t.closest('[data-dmove]'); if (dm) { move(b, b.sel, dm.dataset.dmove); return render(); }
-  const fm = t.closest('[data-fmove]'); if (fm) { const s = b.scripts.find(x => x.path === b.fileSel); if (s && moveIn(b.scripts, s, fm.dataset.fmove)) b.dirty = true; return render(); }
+  const fm = t.closest('[data-fmove]'); if (fm) return move(b, b.fileSel, fm.dataset.fmove);
   if (t.matches('[data-include]')) return;
   const fr = t.closest('[data-file]'); if (fr) { b.fileSel = fr.dataset.file; render(); return document.querySelector(`[data-k="f:${CSS.escape(b.fileSel)}"]`)?.focus(); }
   const bar = t.closest('[data-att]'); if (bar) { b.scrollAttempt = +bar.dataset.att; return selectScript(b, bar.dataset.path, true); }
@@ -798,7 +796,7 @@ document.addEventListener('keydown', e => {
   const li = t.closest('#side [data-batch]');
   if (li) {
     const lb = app.batches.find(x => x.id === +li.dataset.batch), i = app.batches.indexOf(lb);
-    if (e.altKey && dirs[e.key]) { e.preventDefault(); moveIn(app.batches, lb, dirs[e.key]); render(); return document.querySelector(`[data-k="b:${lb.id}"]`)?.focus(); }
+    if (e.altKey && dirs[e.key]) { e.preventDefault(); return moveBatch(lb, dirs[e.key]); }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const nb = app.batches[i + (e.key === 'ArrowDown' ? 1 : -1)]; if (nb) { selectBatch(nb.id); document.querySelector(`[data-k="b:${nb.id}"]`)?.focus(); } }
     if (e.key === 'Delete') removeBatch(lb);
     return;
@@ -811,7 +809,7 @@ document.addEventListener('keydown', e => {
   const fr = t.closest('[data-file]');
   if (fr && b) {
     const list = b.scripts.map(s => s.path), i = list.indexOf(fr.dataset.file);
-    if (e.altKey && dirs[e.key]) { e.preventDefault(); if (!locked(b) && moveIn(b.scripts, b.scripts[i], dirs[e.key])) b.dirty = true; render(); }
+    if (e.altKey && dirs[e.key]) { e.preventDefault(); if (!locked(b)) move(b, list[i], dirs[e.key]); }
     else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); b.fileSel = list[Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; render(); }
     else if (e.key === ' ' && !locked(b) && b.scripts[i].state !== 'Missing') { e.preventDefault(); setInclude(b, b.scripts[i], !b.scripts[i].include); }
     else return;

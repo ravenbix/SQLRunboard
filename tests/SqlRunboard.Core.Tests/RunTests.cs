@@ -129,7 +129,7 @@ public sealed class RunTests : IDisposable
 
         b = list.Run(b.Id)!;
 
-        Assert.Equal([new ScriptEntry("2.sql", true), new ScriptEntry("3.sql", false), new ScriptEntry("1.sql", true)], b.Scripts);
+        Assert.Equal([("2.sql", true), ("3.sql", false), ("1.sql", true)], b.Scripts.Select(s => (s.Path, s.Include)));
         Assert.Equal(["2.sql", "1.sql"], b.Run!.Scripts.Select(s => s.Path));
     }
 

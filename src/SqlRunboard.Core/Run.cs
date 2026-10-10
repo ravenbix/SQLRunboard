@@ -9,8 +9,9 @@ public sealed record ScriptRun(string Path, ScriptStatus Status, IReadOnlyList<A
 /// <summary>
 /// The current run of a batch, as the page sees it. Scripts are in the start order; Queue has the Queued paths in queue order.
 /// Now is the server clock when this state was made, so the page can show the elapsed time of Running scripts.
+/// Ended: the target or the file scan changed after the run. Reruns do nothing until the next Run.
 /// </summary>
-public sealed record RunState(DateTimeOffset Start, DateTimeOffset Now, IReadOnlyList<ScriptRun> Scripts, IReadOnlyList<string> Queue)
+public sealed record RunState(DateTimeOffset Start, DateTimeOffset Now, IReadOnlyList<ScriptRun> Scripts, IReadOnlyList<string> Queue, bool Ended = false)
 {
     public bool Active => Scripts.Any(s => s.Status is ScriptStatus.Queued or ScriptStatus.Running);
 }

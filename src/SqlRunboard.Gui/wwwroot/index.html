@@ -219,7 +219,7 @@ function toRun(r) {
   const t0 = Date.parse(r.start), sec = x => x == null ? null : (Date.parse(x) - t0) / 1000, skew = Date.parse(r.now) - Date.now(), rs = {};
   for (const s of r.scripts) rs[s.path] = { status: s.status, error: s.error, msgs: [], attempts: s.attempts.map((a, i) => ({ n: i + 1, start: sec(a.start), end: sec(a.end), status: a.status, rows: a.rows, error: a.error })) };
   const ended = !r.scripts.some(s => s.status === 'Queued' || s.status === 'Running');
-  return { rs, queue: r.queue, wall: new Date(t0), live: true, ended, endAt: ended ? Math.max(0, ...Object.values(rs).flatMap(x => x.attempts.map(a => a.end ?? 0))) : null, get t() { return (Date.now() + skew - t0) / 1000; } };
+  return { rs, queue: r.queue, wall: new Date(t0), live: true, ended, stale: r.ended, endAt: ended ? Math.max(0, ...Object.values(rs).flatMap(x => x.attempts.map(a => a.end ?? 0))) : null, get t() { return (Date.now() + skew - t0) / 1000; } };
 }
 const fromView = s => ({ folder: s.folder || null, filters: s.filters, recurse: s.recurse, parallelLimit: +s.parallelLimit, stopOnFirstFailure: s.stopOnFirstFailure, confirmBeforeRun: s.confirmBeforeRun,
   timeoutSeconds: s.timeoutSeconds === '' ? null : +s.timeoutSeconds,
@@ -267,10 +267,11 @@ function moveIn(arr, item, dir) {
 }
 const canMove = (b, path) => b.run ? !b.run.ended && b.run.rs[path]?.status === 'Queued' : !locked(b) && !!b.scripts.find(x => x.path === path);
 const locked = b => !!b.signing || !!(b.run && b.run.live && !b.run.ended);
+const canRerun = (b, r) => DONE.includes(r.status) && !b.signing && !b.run.stale; // stale: the settings changed, so the run ended
 
 // ponytail: stand-ins for the commands of later tickets. Each ticket replaces its names with a POST.
 const todo = () => toast('Not available yet.');
-const rerun = todo, move = todo, logon = todo;
+const move = todo, logon = todo;
 // Edits go to the server one at a time, in the order you make them. queued() gives the error to the caller; sendEdit() shows it.
 let edits = Promise.resolve();
 function queued(url, body) { const p = edits.then(() => post(url, body)); edits = p.catch(() => null); return p; }
@@ -286,6 +287,8 @@ async function runBatch(b) {
 }
 const cancel = (b, path) => sendEdit(`/api/batches/${b.id}/cancel`, { path });
 const cancelAll = b => sendEdit(`/api/batches/${b.id}/cancel-all`, {});
+const rerun = (b, path) => sendEdit(`/api/batches/${b.id}/rerun`, { path });
+const rerunFailed = b => sendEdit(`/api/batches/${b.id}/rerun-failed`, {});
 function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
 // The folder, Open and Save as dialogs: the server lists the folders (and the batch files). kind: folder, open or saveAs.
 async function browse(b, path, kind = 'folder') {
@@ -408,7 +411,7 @@ function renderHeader(b) {
     ${b.signing ? `<span>${esc(b.signing.text)}</span><button data-cmd="cancelSignIn">Cancel</button>`
       : `<button class="primary" data-cmd="run" title="F5" ${live ? 'disabled' : ''}>Run</button>`}
     <button data-cmd="cancelAll" title="Shift+F5" ${live ? '' : 'disabled'}>Cancel all</button>
-    <button data-cmd="rerunFailed" ${bad && !b.signing ? '' : 'disabled'}>Rerun all failed</button>
+    <button data-cmd="rerunFailed" ${bad && !b.signing && !run.stale ? '' : 'disabled'}>Rerun all failed</button>
     <span>${run ? `${c.Succeeded + bad} of ${n} done${bad ? `, ${bad} failed` : ''}${run.ended ? ' · Run ended' : ''}` : 'Not run yet'}</span>
     <div class="prog" aria-hidden="true">${seg('Succeeded', c.Succeeded)}${seg('Failed', bad)}${seg('Running', c.Running)}</div>
     ${b.logonMsg ? `<div class="banner err" role="alert">${esc(b.logonMsg)}</div>` : ''}`;
@@ -423,6 +426,7 @@ function renderRun(b) {
   if (app.view === 'timeline') head += `<label><input type="checkbox" data-tl="tlColumns" ${app.tlColumns ? 'checked' : ''}> Columns</label><label><input type="checkbox" data-tl="tlCollapse" ${app.tlCollapse ? 'checked' : ''}> Collapse idle gaps</label>`;
   head += '</div>';
   if (run?.restored && !run.live) head += `<p class="note">Last run, from <span class="tnum">logs/${esc(b.name)}_${stamp(run.wall)}/summary.csv</span>.${run.unfinished ? ` Interrupted: the app stopped at or after ${clock(run, run.newest)}.` : ''} Rerun opens this run again. Run starts a new run.</p>`;
+  if (run?.stale) head += '<p class="note">The settings changed. Run the batch again.</p>';
   if (!run) head += '<p class="note">No run yet. These scripts are Queued in the start order. Move them here or in the Files tab.</p>';
   return head + (app.view === 'board' ? renderBoard(b) : app.view === 'table' ? renderTable(b) : renderTimeline(b));
 }
@@ -551,7 +555,7 @@ function renderDrawer(b) {
   }
   return `<div class="dh"><div class="t">${bubble(r.status)}<span>${esc(x.path)}</span></div>
     <button data-cmd="dCancel" ${live && (r.status === 'Queued' || (r.status === 'Running' && a.rollback == null)) ? '' : 'disabled'}>Cancel</button>
-    <button data-cmd="dRerun" ${DONE.includes(r.status) && !b.signing ? '' : 'disabled'}>Rerun</button>
+    <button data-cmd="dRerun" ${canRerun(b, r) ? '' : 'disabled'}>Rerun</button>
     ${['top', 'up', 'down', 'bottom'].map(d => `<button data-dmove="${d}" aria-label="${{ top: 'Move to top', up: 'Move up', down: 'Move down', bottom: 'Move to bottom' }[d]}" title="${{ top: 'Move to top (Alt+Home)', up: 'Move up (Alt+↑)', down: 'Move down (Alt+↓)', bottom: 'Move to bottom (Alt+End)' }[d]}" ${mv ? '' : 'disabled'}>${{ top: '⤒', up: '↑', down: '↓', bottom: '⤓' }[d]}</button>`).join('')}
     <button data-cmd="closeDrawer" aria-label="Close drawer" title="Esc">✕</button>
     <div class="seg" role="group" aria-label="Drawer view" style="flex-basis:100%"><button data-dview="messages" aria-pressed="${b.dview !== 'script'}">Messages</button><button data-dview="script" aria-pressed="${b.dview === 'script'}">Script</button></div></div>
@@ -654,7 +658,7 @@ function openMenu(b, path, x, y) {
   el.innerHTML = `<div class="m" role="menu" aria-label="${esc(path)}" style="left:${Math.min(x, innerWidth - 230)}px;top:${Math.min(y, innerHeight - 260)}px">
     ${it('open', 'Show messages', 'Enter', true)}
     ${it('cancel', 'Cancel', '', live && (r.status === 'Queued' || (r.status === 'Running' && lastA(r).rollback == null)))}
-    ${it('rerun', 'Rerun', '', DONE.includes(r.status) && !b.signing)}<hr>
+    ${it('rerun', 'Rerun', '', canRerun(b, r))}<hr>
     ${it('top', 'Move to top', 'Alt+Home', mv)}${it('up', 'Move up', 'Alt+↑', mv)}${it('down', 'Move down', 'Alt+↓', mv)}${it('bottom', 'Move to bottom', 'Alt+End', mv)}</div>`;
   el.querySelector('button:not(:disabled)')?.focus();
   render();
@@ -685,9 +689,9 @@ function cmd(c, el) {
     case 'run': return runBatch(b);
     case 'cancelSignIn': b.signing = null; return render();
     case 'cancelAll': cancelAll(b); return render();
-    case 'rerunFailed': rerun(b, Object.entries(b.run.rs).filter(([, r]) => r.status === 'Failed' || r.status === 'Cancelled').map(([p]) => p)); return render();
+    case 'rerunFailed': rerunFailed(b); return render();
     case 'dCancel': cancel(b, b.sel); return render();
-    case 'dRerun': rerun(b, [b.sel]); return render();
+    case 'dRerun': rerun(b, b.sel); return render();
     case 'closeDrawer': b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel)}"]`)?.focus();
     case 'runlog': return todo();
     case 'test': return logon(b, login => { b.testMsg = `Connected. Server ${b.settings.server.split('.')[0].toUpperCase()}, database ${b.settings.database}, login ${login}.`; });
@@ -708,7 +712,7 @@ document.addEventListener('click', e => {
   const mc = t.closest('[data-mcmd]');
   if (mc) {
     const { b: mb, path } = app.menu, c = mc.dataset.mcmd; closeMenu();
-    if (c === 'open') selectScript(mb, path, true); else if (c === 'cancel') cancel(mb, path); else if (c === 'rerun') rerun(mb, [path]); else move(mb, path, c);
+    if (c === 'open') selectScript(mb, path, true); else if (c === 'cancel') cancel(mb, path); else if (c === 'rerun') rerun(mb, path); else move(mb, path, c);
     return render();
   }
   const c = t.closest('[data-cmd]'); if (c) { e.preventDefault(); return cmd(c.dataset.cmd, c); }

@@ -82,6 +82,10 @@ public sealed class GuiHost : IAsyncDisposable
             list.Cancel(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/cancel-all", (int id, BatchList list) =>
             list.CancelAll(id) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/rerun", (int id, ScriptRequest r, BatchList list) =>
+            list.Rerun(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/rerun-failed", (int id, BatchList list) =>
+            list.RerunFailed(id) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/open", (PathRequest r, BatchList list) => FileResult(() => list.Open(r.Path)));
         app.MapPost("/api/batches/{id:int}/save", (int id, SaveRequest r, BatchList list) => FileResult(() => list.Save(id, r.Path, r.Overwrite)));
         app.MapPost("/api/batches/{id:int}/reload", (int id, BatchList list) => FileResult(() => list.Reload(id)));

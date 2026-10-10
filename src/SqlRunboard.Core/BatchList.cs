@@ -8,11 +8,13 @@ public sealed record Change(string Kind, object Data);
 /// <summary>
 /// The side list: all batches, in the order you added them. The server keeps this state; the page shows it.
 /// Each subscriber gets the full state, then every change after it.
+/// It also runs the batches: each batch has its own queue and parallel limit, and many batches can run at once.
 /// </summary>
-public sealed class BatchList
+public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
 {
     readonly Lock gate = new();
     readonly List<Batch> batches = [];
+    readonly Dictionary<int, ActiveRun> runs = [];
     readonly List<Channel<Change>> subscribers = [];
     int lastId, lastUntitled;
 
@@ -49,9 +51,93 @@ public sealed class BatchList
     {
         var i = batches.FindIndex(b => b.Id == id);
         if (i < 0) return null;
+        if (batches[i].Run?.Active == true) return batches[i]; // the run locks the settings and the check boxes
         var batch = batches[i] = change(batches[i]) with { Dirty = true };
         Publish(new Change("batch", batch));
         return batch;
+    }
+
+    /// <summary>
+    /// Scans the folder again and queues all included scripts in the start order. Returns the batch with its new run,
+    /// the batch unchanged if its run still has Queued or Running scripts, or null if no batch has this id.
+    /// </summary>
+    public Batch? Run(int id)
+    {
+        lock (gate)
+        {
+            var i = batches.FindIndex(b => b.Id == id);
+            if (i < 0) return null;
+            var b = batches[i];
+            if (b.Run?.Active == true) return b;
+            var folder = FolderPath(b.File, b.Settings.Folder);
+            var scripts = Merge(b.Scripts, FileScan.Scan(folder, b.Settings.Filters, b.Settings.Recurse));
+            batches[i] = b with { Scripts = scripts, Dirty = b.Dirty || !scripts.SequenceEqual(b.Scripts) };
+            var run = runs[id] = new ActiveRun(time.GetUtcNow(), folder ?? "", b.Settings);
+            foreach (var s in scripts.Where(s => s.Include))
+            {
+                run.Scripts[s.Path] = new ScriptRun(s.Path, ScriptStatus.Queued, []);
+                run.Queue.Add(s.Path);
+            }
+            Pump(id, run);
+            return batches[i];
+        }
+    }
+
+    /// <summary>The mutable state of a run. Change it only under the lock.</summary>
+    sealed class ActiveRun(DateTimeOffset start, string folder, BatchSettings settings)
+    {
+        public DateTimeOffset Start => start;
+        public string Folder => folder;
+        public BatchSettings Settings => settings;
+        public OrderedDictionary<string, ScriptRun> Scripts { get; } = new(StringComparer.Ordinal); // the start order
+        public List<string> Queue { get; } = [];
+        public int Running { get; set; }
+
+        public void Add(string path, Attempt a) { var s = Scripts[path]; Scripts[path] = s with { Status = a.Status, Attempts = [.. s.Attempts, a] }; }
+        public void SetLast(string path, Attempt a) { var s = Scripts[path]; Scripts[path] = s with { Status = a.Status, Attempts = [.. s.Attempts.SkipLast(1), a] }; }
+    }
+
+    // Call under the lock. Starts Queued scripts up to the parallel limit, then publishes the run.
+    void Pump(int id, ActiveRun run)
+    {
+        while (run.Running < run.Settings.ParallelLimit && run.Queue.Count > 0)
+        {
+            var path = run.Queue[0];
+            run.Queue.RemoveAt(0);
+            var start = time.GetUtcNow();
+            string text;
+            // Each script reads its file when it starts, so you can fix a Queued script.
+            // ponytail: the read runs under the lock; move it out if slow network folders block the page.
+            try { text = File.ReadAllText(Path.Combine(run.Folder, path)); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                run.Add(path, new Attempt(start, start, ScriptStatus.Failed, null, e is FileNotFoundException or DirectoryNotFoundException ? "File not found" : e.Message));
+                continue;
+            }
+            run.Running++;
+            run.Add(path, new Attempt(start, null, ScriptStatus.Running, null, null));
+            var execution = new SqlExecution(path, [text], new SqlConnectionSettings(run.Settings.Target, Password: null));
+            // The continuation runs on the thread pool, never inline here under the lock.
+            _ = executor.ExecuteAsync(execution, _ => { }, CancellationToken.None)
+                .ContinueWith(t => Finish(id, run, path, start, t), TaskScheduler.Default);
+        }
+        var i = batches.FindIndex(b => b.Id == id);
+        if (i < 0 || runs.GetValueOrDefault(id) != run) return;
+        var state = new RunState(run.Start, time.GetUtcNow(), [.. run.Scripts.Values], [.. run.Queue]);
+        Publish(new Change("batch", batches[i] = batches[i] with { Run = state }));
+    }
+
+    void Finish(int id, ActiveRun run, string path, DateTimeOffset start, Task<SqlResult> t)
+    {
+        lock (gate)
+        {
+            var end = time.GetUtcNow();
+            run.SetLast(path, t.IsCompletedSuccessfully ? new Attempt(start, end, t.Result.Status, t.Result.Rows, t.Result.Error)
+                : t.IsCanceled ? new Attempt(start, end, ScriptStatus.Cancelled, null, null)
+                : new Attempt(start, end, ScriptStatus.Failed, null, t.Exception!.GetBaseException().Message));
+            run.Running--;
+            Pump(id, run);
+        }
     }
 
     /// <summary>A relative folder is relative to the batch file. An unsaved batch has an absolute folder.</summary>

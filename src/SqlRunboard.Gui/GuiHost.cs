@@ -1,0 +1,81 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using SqlRunboard.Core;
+
+namespace SqlRunboard.Gui;
+
+/// <param name="AppDataFolder">Settings, lock file and logs of unsaved batches. Created if missing.</param>
+public sealed record GuiHostOptions(string AppDataFolder, ISqlExecutor Executor, TimeProvider Time);
+
+/// <summary>The local web server: Kestrel on 127.0.0.1, a random port, a random token. See docs/SPEC.md "GUI host".</summary>
+public sealed class GuiHost : IAsyncDisposable
+{
+    public const string CookieName = "sqlrunboard";
+
+    readonly WebApplication app;
+
+    GuiHost(WebApplication app, Uri baseUrl, string token) { this.app = app; BaseUrl = baseUrl; Token = token; }
+
+    public Uri BaseUrl { get; }
+    public string Token { get; }
+    /// <summary>The URL to open. The first request changes the token into a cookie.</summary>
+    public Uri StartUrl => new(BaseUrl, "/?token=" + Token);
+
+    public static async Task<GuiHost> StartAsync(GuiHostOptions options)
+    {
+        Directory.CreateDirectory(options.AppDataFolder);
+        var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseKestrel(k => k.Listen(IPAddress.Loopback, 0));
+        builder.Logging.SetMinimumLevel(LogLevel.Warning);
+        builder.Services.AddSingleton(options);
+        builder.Services.AddSingleton(options.Executor);
+        builder.Services.AddSingleton(options.Time);
+
+        var app = builder.Build();
+        app.Use(RequireToken(token));
+        var files = new EmbeddedFileProvider(typeof(GuiHost).Assembly, "SqlRunboard.Gui.wwwroot");
+        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
+        app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
+
+        await app.StartAsync();
+        return new GuiHost(app, new Uri(app.Urls.First()), token);
+    }
+
+    /// <summary>The token in the query string becomes a cookie, then a redirect drops it from the URL. All other requests need the cookie.</summary>
+    static Func<HttpContext, RequestDelegate, Task> RequireToken(string token)
+    {
+        var expected = Encoding.UTF8.GetBytes(token);
+        bool Valid(string? s) => s is not null && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(s), expected);
+
+        return async (ctx, next) =>
+        {
+            if (ctx.Request.Query.TryGetValue("token", out var q))
+            {
+                if (!Valid(q)) { ctx.Response.StatusCode = StatusCodes.Status401Unauthorized; return; }
+                ctx.Response.Cookies.Append(CookieName, token, new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Strict, Path = "/" });
+                ctx.Response.Redirect(ctx.Request.PathBase + ctx.Request.Path);
+                return;
+            }
+            if (!Valid(ctx.Request.Cookies[CookieName])) { ctx.Response.StatusCode = StatusCodes.Status401Unauthorized; return; }
+            await next(ctx);
+        };
+    }
+
+    public Task WaitForShutdownAsync() => app.WaitForShutdownAsync();
+
+    public async ValueTask DisposeAsync()
+    {
+        await app.StopAsync();
+        await app.DisposeAsync();
+    }
+}

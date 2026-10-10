@@ -58,7 +58,7 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(options.Executor);
         builder.Services.AddSingleton(options.Time);
-        builder.Services.AddSingleton<BatchList>();
+        builder.Services.AddSingleton(new BatchList(options.Executor, options.Time, options.AppDataFolder));
         builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
         var app = builder.Build();

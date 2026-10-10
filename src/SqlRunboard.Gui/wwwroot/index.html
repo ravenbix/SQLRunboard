@@ -251,6 +251,7 @@ function connect() {
   });
   es.addEventListener('batch', e => { upsert(JSON.parse(e.data)); render(); });
   es.addEventListener('remove', e => dropBatch(JSON.parse(e.data).id));
+  es.addEventListener('warning', e => { const w = JSON.parse(e.data); toast(`${app.batches.find(b => b.id === w.id)?.name ?? 'Batch'}: ${w.text}`); });
   es.onerror = () => { delete document.documentElement.dataset.connected; };
 }
 

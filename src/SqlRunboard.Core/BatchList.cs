@@ -17,6 +17,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
     readonly Dictionary<int, ActiveRun> runs = [];
     readonly List<Channel<Change>> subscribers = [];
     readonly Dictionary<int, string> passwords = []; // in memory only: never in a Batch, a file or an event
+    readonly Dictionary<int, string> loaded = []; // batch id -> the file text that the app last read or wrote
     int lastId, lastUntitled;
 
     public Batch NewBatch()
@@ -36,11 +37,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         lock (gate)
         {
             // ponytail: the scan runs under the lock; move it out if a slow network folder blocks the page.
-            return Replace(id, b =>
-            {
-                if (b.Settings.Target != settings.Target) passwords.Remove(id); // a new target asks for the password again
-                return b with { Settings = settings, Scripts = Merge(b.Scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)) };
-            });
+            return Replace(id, b => b with { Settings = settings, Scripts = Merge(b.Scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)), Run = EndRun(b, settings) });
         }
     }
 
@@ -69,11 +66,118 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         return logon;
     }
 
+    /// <summary>
+    /// Call under the lock. A change to the target or the file scan ends the current run: reruns do nothing until the next Run.
+    /// The other settings apply to the next reruns. A run with Queued or Running scripts does not end.
+    /// </summary>
+    RunState? EndRun(Batch b, BatchSettings settings)
+    {
+        var (a, run) = (b.Settings, b.Run);
+        var newTarget = a.Target with { PasswordVariable = null } != settings.Target with { PasswordVariable = null };
+        if (newTarget) passwords.Remove(b.Id); // a new target asks for the password again
+        var ends = newTarget || (a.Folder, a.Filters, a.Recurse) != (settings.Folder, settings.Filters, settings.Recurse);
+        return ends && run is { Ended: false, Active: false } && runs.Remove(b.Id) ? run with { Ended = true } : run;
+    }
+
     /// <summary>Sets or clears the check box of one file. Null if no batch has this id.</summary>
     public Batch? SetInclude(int id, string path, bool include)
     {
         lock (gate)
             return Replace(id, b => b with { Scripts = [.. b.Scripts.Select(s => s.Path == path ? s with { Include = include } : s)] });
+    }
+
+    /// <summary>
+    /// Writes the batch file. Path null: Save, to the current file. Otherwise Save as, to that full path; the app adds .sqlrunboard.json if it is not there.
+    /// Throws BatchFileChangedException if the file on disk is not the version that the app loaded, unless overwrite is true. Null if no batch has this id.
+    /// </summary>
+    public Batch? Save(int id, string? path, bool overwrite)
+    {
+        if (path is not null && !Path.IsPathFullyQualified(path)) throw new ArgumentException($"Type a full path: {path}");
+        lock (gate)
+        {
+            var i = batches.FindIndex(b => b.Id == id);
+            if (i < 0) return null;
+            var b = batches[i];
+            var file = path is null ? b.File ?? throw new ArgumentException("The batch has no file. Use Save as.")
+                : BatchFile.HasExtension(path) ? Path.GetFullPath(path) : Path.GetFullPath(path + BatchFile.Extension);
+            // ponytail: Save as over another existing file overwrites it without a question; ask first if users lose files that way.
+            if (!overwrite && file == b.File && File.Exists(file) && File.ReadAllText(file) != loaded.GetValueOrDefault(id)) throw new BatchFileChangedException(file);
+            var settings = b.Settings with { Folder = Rebase(b.File, file, b.Settings.Folder) };
+            var text = BatchFile.Format(settings, b.Scripts);
+            File.WriteAllText(file, text);
+            loaded[id] = text;
+            var batch = batches[i] = b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings };
+            Publish(new Change("batch", batch));
+            return batch;
+        }
+    }
+
+    /// <summary>
+    /// Adds a batch file to the list, or gives the entry that already has this file. The path must be full and end with .sqlrunboard.json.
+    /// Throws FileNotFoundException, or InvalidDataException for an incorrect file.
+    /// </summary>
+    public Batch Open(string path)
+    {
+        if (!Path.IsPathFullyQualified(path) || !BatchFile.HasExtension(path)) throw new ArgumentException($"Select a full path to a {BatchFile.Extension} file: {path}");
+        var file = Path.GetFullPath(path);
+        lock (gate)
+        {
+            // ponytail: an ordinal path compare; the same file with another letter case on Windows or macOS gets a second entry.
+            if (batches.Find(b => b.File == file) is { } open) return open;
+            var batch = Load(new Batch(++lastId, BatchFile.NameOf(file), file, Dirty: false, new BatchSettings(), Scripts: []));
+            batches.Add(batch);
+            Publish(new Change("batch", batch));
+            return batch;
+        }
+    }
+
+    /// <summary>"Load again": replaces the batch with its file on disk. Null if no batch has this id.</summary>
+    public Batch? Reload(int id)
+    {
+        lock (gate)
+        {
+            var i = batches.FindIndex(b => b.Id == id);
+            if (i < 0) return null;
+            if (batches[i].File is null) throw new ArgumentException("The batch has no file.");
+            var batch = batches[i] = Load(batches[i]);
+            Publish(new Change("batch", batch));
+            return batch;
+        }
+    }
+
+    // Call under the lock. Reads b.File and scans its folder.
+    Batch Load(Batch b)
+    {
+        var text = File.ReadAllText(b.File!);
+        var (settings, scripts) = BatchFile.Parse(text);
+        loaded[b.Id] = text;
+        return b with { Dirty = false, Settings = settings, Scripts = Merge(scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)), Run = EndRun(b, settings) };
+    }
+
+    /// <summary>"Remove from list". The file stays on disk. The run of the batch is cancelled. False if no batch has this id.</summary>
+    public bool Remove(int id)
+    {
+        CancelAll(id); // outside the lock: see Cancel
+        lock (gate)
+        {
+            if (batches.RemoveAll(b => b.Id == id) == 0) return false;
+            loaded.Remove(id);
+            passwords.Remove(id);
+            runs.Remove(id);
+            Publish(new Change("remove", new { id }));
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The folder for a batch file at newFile. A relative folder (or any folder of an unsaved batch) becomes relative to newFile, with /.
+    /// It stays absolute if no relative path is possible (another Windows drive). An absolute folder of a saved batch is your choice and stays.
+    /// </summary>
+    static string? Rebase(string? oldFile, string newFile, string? folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || (oldFile is not null && Path.IsPathRooted(folder))) return folder;
+        var rel = Path.GetRelativePath(Path.GetDirectoryName(newFile)!, Path.GetFullPath(FolderPath(oldFile, folder)!));
+        return Path.IsPathRooted(rel) ? rel : rel.Replace('\\', '/');
     }
 
     // Call under the lock.
@@ -143,12 +247,42 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         return batch;
     }
 
+    /// <summary>
+    /// Reruns one completed script of the current run. It goes to the bottom of the queue and reads its file again.
+    /// Returns the batch, or null if no batch has this id.
+    /// </summary>
+    public Batch? Rerun(int id, string path) => Rerun(id, _ => [path]);
+
+    /// <summary>Reruns all Failed and Cancelled scripts of the current run, in the start order. Null if no batch has this id.</summary>
+    public Batch? RerunFailed(int id) =>
+        Rerun(id, run => [.. run.Scripts.Values.Where(s => s.Status is ScriptStatus.Failed or ScriptStatus.Cancelled).Select(s => s.Path)]);
+
+    // Reruns ignore the check boxes. They add attempts to the current run.
+    Batch? Rerun(int id, Func<ActiveRun, IReadOnlyList<string>> paths)
+    {
+        lock (gate)
+        {
+            if (runs.GetValueOrDefault(id) is { } run && Find(id) is { } batch)
+            {
+                run.Settings = batch.Settings; // reruns use the current parallel limit, stop setting and timeout
+                foreach (var path in paths(run))
+                    if (run.Scripts.TryGetValue(path, out var s) && s.Status is ScriptStatus.Succeeded or ScriptStatus.Failed or ScriptStatus.Cancelled)
+                    {
+                        run.Scripts[path] = s with { Status = ScriptStatus.Queued, Error = null };
+                        run.Queue.Add(path);
+                    }
+                Pump(id, run);
+            }
+            return Find(id);
+        }
+    }
+
     /// <summary>The mutable state of a run. Change it only under the lock.</summary>
     sealed class ActiveRun(DateTimeOffset start, string folder, BatchSettings settings)
     {
         public DateTimeOffset Start => start;
         public string Folder => folder;
-        public BatchSettings Settings => settings;
+        public BatchSettings Settings { get; set; } = settings; // a rerun sets the current settings; they cannot change while scripts run
         public OrderedDictionary<string, ScriptRun> Scripts { get; } = new(StringComparer.Ordinal); // the start order
         public List<string> Queue { get; } = [];
         public int Running { get; set; }
@@ -159,7 +293,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time)
         /// <summary>"Stop the queue at the first failure": no new scripts start. The Running scripts continue.</summary>
         public void Failed()
         {
-            if (!settings.StopOnFirstFailure) return;
+            if (!Settings.StopOnFirstFailure) return;
             foreach (var path in Queue) Scripts[path] = Scripts[path] with { Status = ScriptStatus.Cancelled, Error = "Not started: the queue stopped" };
             Queue.Clear();
         }

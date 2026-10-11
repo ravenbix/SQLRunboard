@@ -25,5 +25,7 @@ public class RunLogTests : AppPageTest
         App.Time.Advance(TimeSpan.FromSeconds(5));
 
         await Expect(Page.Locator("#toast")).ToContainTextAsync($"{b.Name}: Warning: cannot write summary.csv");
+        await Page.Locator("#panel .card:has-text('b.sql')").ClickAsync();
+        await Expect(Page.Locator("#drawer .msgs")).ToContainTextAsync("Warning: cannot write summary.csv"); // the drawer of each script of the run
     }
 }

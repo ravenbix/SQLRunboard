@@ -223,4 +223,21 @@ public sealed class RunLogTests : IDisposable
         await Until(b.Id, Ended);
         Assert.Contains("2.sql,1,Succeeded", File.ReadAllText(csv));
     }
+
+    [Fact]
+    public async Task Stop_cancels_all_scripts_of_all_batches_and_ends_when_the_logs_are_written()
+    {
+        var a = NewBatch(new BatchSettings { ParallelLimit = 1 }, "1.sql", "2.sql");
+        Script("1.sql", 60); Script("2.sql", 60);
+        list.Run(a.Id);
+        await Until(a.Id, r => r.Scripts[0].Status == ScriptStatus.Running);
+
+        await list.StopAsync().WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var folder = Path.Combine(appData, "logs", "Untitled 1_20261009-140000");
+        var csv = File.ReadAllText(Path.Combine(folder, "summary.csv"));
+        Assert.Contains("1.sql,1,Cancelled", csv);
+        Assert.Contains("2.sql,0,Cancelled", csv);
+        Assert.Contains("Run ended: 2 scripts, 0 succeeded, 0 failed, 2 cancelled.", File.ReadAllText(Path.Combine(folder, "run.log")));
+    }
 }

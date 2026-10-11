@@ -110,6 +110,8 @@ public sealed class GuiHost : IAsyncDisposable
         app.MapPost("/api/batches/{id:int}/save", (int id, SaveRequest r, BatchList list) => FileResult(() => list.Save(id, r.Path, r.Overwrite)));
         app.MapPost("/api/batches/{id:int}/reload", (int id, BatchList list) => FileResult(() => list.Reload(id)));
         app.MapPost("/api/batches/{id:int}/remove", (int id, BatchList list) => list.Remove(id) ? Results.Ok(new { }) : Results.NotFound());
+        // Quit: the page asked to save and confirmed. The stop itself runs in the ApplicationStopping handler below.
+        app.MapPost("/api/quit", (IHostApplicationLifetime lifetime) => { lifetime.StopApplication(); return Results.Ok(new { }); });
         app.MapPost("/api/app-data/open", (GuiHostOptions o) =>
         {
             // UseShellExecute on a folder opens the file manager: Explorer, Finder or xdg-open.
@@ -128,8 +130,17 @@ public sealed class GuiHost : IAsyncDisposable
             return Results.Ok(new { path, parent = Path.GetDirectoryName(path), folders, files });
         });
 
+        var lockPath = Path.Combine(options.AppDataFolder, LockFileName);
+        // Quit, Ctrl+C (ConsoleLifetime), SIGTERM and DisposeAsync all come here: cancel all scripts, write the logs, remove the lock file.
+        app.Lifetime.ApplicationStopping.Register(() =>
+        {
+            // ponytail: a script that does not stop in 10 s keeps no final log line; raise the limit if a real cancel takes longer.
+            app.Services.GetRequiredService<BatchList>().StopAsync().Wait(TimeSpan.FromSeconds(10));
+            File.Delete(lockPath);
+        });
+
         await app.StartAsync();
-        var host = new GuiHost(app, new Uri(app.Urls.First()), token, Path.Combine(options.AppDataFolder, LockFileName));
+        var host = new GuiHost(app, new Uri(app.Urls.First()), token, lockPath);
         host.WriteLock();
         return host;
     }
@@ -187,7 +198,7 @@ public sealed class GuiHost : IAsyncDisposable
     static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, AppSettings settings, [EnumeratorCancellation] CancellationToken ct)
     {
         using var sub = list.Subscribe();
-        yield return new SseItem<object>(new { batches = sub.Snapshot, app = settings.Snapshot() }, "snapshot");
+        yield return new SseItem<object>(new { batches = sub.Snapshot, app = settings.Snapshot(), messages = sub.Messages }, "snapshot");
         await foreach (var change in sub.Changes.ReadAllAsync(ct))
             yield return new SseItem<object>(change.Data, change.Kind);
     }

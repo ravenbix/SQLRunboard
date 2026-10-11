@@ -45,6 +45,35 @@ public class ExecutableTests
     }
 
     [Fact]
+    public async Task Ctrl_C_stops_the_server_and_removes_the_lock_file()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "No SIGINT for a child process on Windows. Quit and Ctrl+C share the ApplicationStopping handler (QuitTests).");
+        var appData = Directory.CreateTempSubdirectory("sqlrunboard-exe-").FullName;
+        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
+        {
+            ArgumentList = { Path.Combine(AppContext.BaseDirectory, "sqlrunboard.dll"), "--app-data", appData, "--no-browser" },
+            RedirectStandardOutput = true,
+        };
+        using var exe = Process.Start(psi)!;
+        try
+        {
+            await exe.StandardOutput.ReadLineAsync(Ct).AsTask().WaitAsync(TimeSpan.FromSeconds(30), Ct);
+            Assert.True(File.Exists(Path.Combine(appData, "sqlrunboard.lock")));
+
+            using (var kill = Process.Start("kill", ["-INT", exe.Id.ToString()])) await kill.WaitForExitAsync(Ct); // Ctrl+C
+            await exe.WaitForExitAsync(Ct).WaitAsync(TimeSpan.FromSeconds(30), Ct);
+
+            Assert.Equal(0, exe.ExitCode);
+            Assert.False(File.Exists(Path.Combine(appData, "sqlrunboard.lock")));
+        }
+        finally
+        {
+            if (!exe.HasExited) exe.Kill(entireProcessTree: true);
+            Directory.Delete(appData, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task A_second_start_opens_the_running_server_and_stops()
     {
         await using var app = await TestApp.StartAsync();

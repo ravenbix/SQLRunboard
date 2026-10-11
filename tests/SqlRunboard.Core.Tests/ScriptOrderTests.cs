@@ -1,7 +1,7 @@
 using SqlRunboard.Core;
 
 /// <summary>docs/SPEC.md "Script order": move commands, Sort by file name, New and Missing files. Real temp folders.</summary>
-public sealed class ScriptOrderTests : IDisposable
+public sealed class ScriptOrderTests : IAsyncDisposable
 {
     readonly string root = Directory.CreateTempSubdirectory("sqlrunboard-order-").FullName;
     readonly FakeTime time = new();
@@ -114,5 +114,10 @@ public sealed class ScriptOrderTests : IDisposable
         Assert.False(list.MoveBatch(99, MoveTo.Up));
     }
 
-    public void Dispose() => Directory.Delete(root, recursive: true);
+    /// <summary>Stops the runs first: a late script end writes its log in root.</summary>
+    public async ValueTask DisposeAsync()
+    {
+        await list.StopAsync();
+        Directory.Delete(root, recursive: true);
+    }
 }

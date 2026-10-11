@@ -1,7 +1,7 @@
 using SqlRunboard.Core;
 
 /// <summary>The log folder of a run: run.log and summary.csv. Seen through BatchList and the files on disk. FakeTime local zone is +02:00.</summary>
-public sealed class RunLogTests : IDisposable
+public sealed class RunLogTests : IAsyncDisposable
 {
     readonly string root = Directory.CreateTempSubdirectory("sqlrunboard-log-").FullName;
     readonly string appData;
@@ -18,9 +18,11 @@ public sealed class RunLogTests : IDisposable
         sub = list.Subscribe();
     }
 
-    public void Dispose()
+    /// <summary>Stops the runs first: a late script end writes its log in root.</summary>
+    public async ValueTask DisposeAsync()
     {
         sub.Dispose();
+        await list.StopAsync();
         Directory.Delete(root, recursive: true);
     }
 
@@ -188,7 +190,7 @@ public sealed class RunLogTests : IDisposable
         list.Save(b.Id, Path.Combine(root, "deploy"), overwrite: false);
         time.Advance(TimeSpan.FromSeconds(61));
         list.Run(b.Id);
-        await Until(b.Id, Ended);
+        await Until(b.Id, r => Ended(r) && r.Start == time.GetUtcNow()); // the second run: the Save event still has the first one
 
         Assert.True(File.Exists(Path.Combine(appData, "logs", "Untitled 1_20261009-140000", "summary.csv")));
         Assert.True(File.Exists(Path.Combine(root, "logs", "deploy_20261009-140101", "summary.csv")));

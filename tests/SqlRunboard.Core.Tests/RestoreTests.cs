@@ -1,7 +1,7 @@
 using SqlRunboard.Core;
 
 /// <summary>A restart: a new BatchList gets the batch file paths that the old one reported, and reads the last runs from disk.</summary>
-public sealed class RestoreTests : IDisposable
+public sealed class RestoreTests : IAsyncDisposable
 {
     readonly string root = Directory.CreateTempSubdirectory("sqlrunboard-restore-").FullName;
     readonly FakeTime time = new();
@@ -9,17 +9,21 @@ public sealed class RestoreTests : IDisposable
     readonly BatchList list;
     readonly BatchList.Subscription sub;
     IReadOnlyList<string> files = [];
+    readonly List<BatchList> lists = [];
 
     public RestoreTests()
     {
         executor = new FakeSqlExecutor(time);
         list = new BatchList(executor, time) { FilesChanged = f => files = f };
         sub = list.Subscribe();
+        lists.Add(list);
     }
 
-    public void Dispose()
+    /// <summary>Stops the runs of all lists first: a late script end writes its log in root.</summary>
+    public async ValueTask DisposeAsync()
     {
         sub.Dispose();
+        foreach (var l in lists) await l.StopAsync();
         Directory.Delete(root, recursive: true);
     }
 
@@ -46,6 +50,7 @@ public sealed class RestoreTests : IDisposable
     BatchList Restart()
     {
         var again = new BatchList(executor, time);
+        lists.Add(again);
         again.Restore(files);
         return again;
     }

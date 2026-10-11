@@ -1,7 +1,7 @@
 using SqlRunboard.Core;
 
 /// <summary>The run engine, seen through BatchList: Run, then the published batch changes. Fake executor + fake clock.</summary>
-public sealed class RunTests : IDisposable
+public sealed class RunTests : IAsyncDisposable
 {
     readonly string root = Directory.CreateTempSubdirectory("sqlrunboard-run-").FullName;
     readonly FakeTime time = new();
@@ -346,9 +346,11 @@ public sealed class RunTests : IDisposable
         Assert.True(list.Reload(b.Id)!.Run!.Ended);
     }
 
-    public void Dispose()
+    /// <summary>Stops the runs first: a late script end writes its log in root.</summary>
+    public async ValueTask DisposeAsync()
     {
         sub.Dispose();
+        await list.StopAsync();
         Directory.Delete(root, recursive: true);
     }
 }

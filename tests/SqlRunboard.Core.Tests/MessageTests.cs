@@ -1,7 +1,7 @@
 using SqlRunboard.Core;
 
 /// <summary>The messages of each attempt, for the drawer: live "message" events, and the kept messages in a new subscription.</summary>
-public sealed class MessageTests : IDisposable
+public sealed class MessageTests : IAsyncDisposable
 {
     readonly string root = Directory.CreateTempSubdirectory("sqlrunboard-msg-").FullName;
     readonly FakeTime time = new();
@@ -98,9 +98,11 @@ public sealed class MessageTests : IDisposable
         Assert.All(late.Messages, m => Assert.Equal(SqlMessageKind.Error, m.Messages[0].Kind));
     }
 
-    public void Dispose()
+    /// <summary>Stops the runs first: a late script end writes its log in root.</summary>
+    public async ValueTask DisposeAsync()
     {
         sub.Dispose();
+        await list.StopAsync();
         Directory.Delete(root, recursive: true);
     }
 }

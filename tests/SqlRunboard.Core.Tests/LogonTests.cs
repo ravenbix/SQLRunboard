@@ -1,7 +1,7 @@
 using SqlRunboard.Core;
 
 /// <summary>The password of a batch: the server keeps it in memory after a logon, and forgets it after a logon failure or a target change.</summary>
-public sealed class LogonTests : IDisposable
+public sealed class LogonTests : IAsyncDisposable
 {
     readonly string root = Directory.CreateTempSubdirectory("sqlrunboard-logon-").FullName;
     readonly FakeTime time = new();
@@ -104,5 +104,10 @@ public sealed class LogonTests : IDisposable
     [Fact]
     public async Task An_unknown_batch_has_no_logon() => Assert.Null(await list.LogonAsync(99, "x", ct));
 
-    public void Dispose() => Directory.Delete(root, recursive: true);
+    /// <summary>Stops the runs first: a late script end writes its log in root.</summary>
+    public async ValueTask DisposeAsync()
+    {
+        await list.StopAsync();
+        Directory.Delete(root, recursive: true);
+    }
 }

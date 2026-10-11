@@ -177,7 +177,7 @@ public sealed class GuiHost : IAsyncDisposable
     static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, AppSettings settings, [EnumeratorCancellation] CancellationToken ct)
     {
         using var sub = list.Subscribe();
-        yield return new SseItem<object>(new { batches = sub.Snapshot, app = settings.Snapshot() }, "snapshot");
+        yield return new SseItem<object>(new { batches = sub.Snapshot, app = settings.Snapshot(), messages = sub.Messages }, "snapshot");
         await foreach (var change in sub.Changes.ReadAllAsync(ct))
             yield return new SseItem<object>(change.Data, change.Kind);
     }

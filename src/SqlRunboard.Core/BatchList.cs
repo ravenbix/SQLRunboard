@@ -34,7 +34,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     public void Restore(IEnumerable<string> paths)
     {
         lock (gate)
-            foreach (var file in paths.Distinct(StringComparer.Ordinal))
+            foreach (var file in paths.Where(p => Path.IsPathFullyQualified(p) && BatchFile.HasExtension(p)).Distinct(StringComparer.Ordinal))
             {
                 var b = new Batch(++lastId, BatchFile.NameOf(file), file, Dirty: false, new BatchSettings(), Scripts: []);
                 try { b = LastRun(Load(b)); }

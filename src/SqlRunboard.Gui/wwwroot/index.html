@@ -209,7 +209,7 @@ const app = { ...PREFS, batches: [], cur: null, dialog: null, menu: null };
 // ---------- server state ----------
 // The server keeps all batch state. Each server batch merges into a page object that also keeps the view state (tab, selection, drawer).
 // The page uses the flat settings of the prototype; the server uses the batch file shape (target is nested).
-const toView = sb => ({ ...sb, run: toRun(sb.run), settings: { ...sb.settings, ...sb.settings.target, extra: sb.settings.target.extraConnectionString, timeoutSeconds: sb.settings.timeoutSeconds ?? '' } });
+const toView = sb => ({ ...sb, missing: !!sb.fileError, run: toRun(sb.run), settings: { ...sb.settings, ...sb.settings.target, extra: sb.settings.target.extraConnectionString, timeoutSeconds: sb.settings.timeoutSeconds ?? '' } });
 // The server run (ISO times) in the prototype shape: times are seconds from the start of the run.
 // run.t is "now" on the server clock: the page clock plus the offset that the last state gave (the tests use a fake server clock).
 function toRun(r) {
@@ -367,7 +367,7 @@ function batchStatus(b) {
   const c = counts(b); return c.Failed + c.Cancelled ? 'Failed' : 'Succeeded';
 }
 function progressText(b) {
-  if (b.missing) return 'File not found';
+  if (b.missing) return b.fileError;
   if (b.signing) return 'Signing in...';
   if (!b.run) return 'Not run yet';
   const c = counts(b), n = Object.keys(b.run.rs).length, bad = c.Failed + c.Cancelled;
@@ -419,7 +419,7 @@ function renderSide() {
 }
 function renderHeader(b) {
   if (!b) return '<p class="muted">No batch. Select New batch or Open.</p>';
-  if (b.missing) return `<h1>${esc(b.name)}</h1><div class="banner err">File not found: <span class="tnum">${esc(b.file)}</span>. The batch stays in the list, because the drive can come back. <button data-cmd="remove">Remove from list</button></div>`;
+  if (b.missing) return `<h1>${esc(b.name)}</h1><div class="banner err">${esc(b.fileError)}: <span class="tnum">${esc(b.file)}</span>. The batch stays in the list, because the drive can come back. <button data-cmd="remove">Remove from list</button></div>`;
   const s = b.settings, c = counts(b), run = b.run, n = run ? Object.keys(run.rs).length : 0, live = run && !run.ended, bad = c.Failed + c.Cancelled;
   const seg = (k, v) => n ? `<i style="width:${100 * v / n}%;background:var(${CVAR[k]})"></i>` : '';
   return `<h1>${esc(b.name)}${b.dirty ? ' •' : ''}</h1>

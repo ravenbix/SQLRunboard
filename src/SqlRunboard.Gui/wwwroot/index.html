@@ -513,13 +513,13 @@ function renderTimeline(b) {
   const lead = cols ? '<div class="h">#</div><div class="h">Status</div><div class="h">Script</div><div class="h">Start</div><div class="h">Elapsed</div><div class="h">Att.</div>' : '<div class="h"></div>';
   if (!run) return `<p class="muted">No run yet</p><div class="tlg" style="grid-template-columns:${gridCols}">${lead}<div class="h"></div>${rows.map(x => `${names(x)}<div class="chart ${selCls(b, x)}" data-path="${esc(x.path)}"></div>`).join('')}</div>`;
   const sc = tlScale(b), limit = +b.settings.parallelLimit || 1;
-  const pts = [];
-  for (let i = 0; i <= 300; i++) {
-    const p = i / 300, t = sc.inv(p);
-    pts.push([p, t == null ? 0 : Object.values(run.rs).reduce((n, r) => n + r.attempts.filter(a => a.start != null && a.start <= t && (aEnd(run, a) ?? a.start) > t).length, 0)]);
-  }
-  const top = Math.max(limit, ...pts.map(q => q[1])) + 1;
-  const path = pts.map(([x, y], i) => i ? `H${x}V${top - y}` : `M0 ${top - y}`).join('');
+  // concurrency steps: +1 at each start, -1 at each end (a Running attempt has no end yet); one step per time
+  const ev = Object.values(run.rs).flatMap(r => r.attempts).filter(a => a.start != null)
+    .flatMap(a => { const e = a.status === 'Running' ? null : aEnd(run, a) ?? a.start; return e == null ? [[a.start, 1]] : [[a.start, 1], [e, -1]]; }).sort((p, q) => p[0] - q[0]);
+  const steps = [];
+  for (let i = 0, n = 0; i < ev.length; i++) { n += ev[i][1]; if (ev[i + 1]?.[0] !== ev[i][0] && n !== (steps[steps.length - 1]?.[1] ?? 0)) steps.push([sc.f(ev[i][0]), n]); }
+  const top = Math.max(limit, ...steps.map(q => q[1])) + 1;
+  const path = `M0 ${top}${steps.map(([x, n]) => `H${x}V${top - n}`).join('')}H1`;
   const ticks = [0, .25, .5, .75, 1].map(p => { const t = sc.inv(p); return `<span style="left:${p * 100}%">${t == null ? '' : dur(t)}</span>`; }).join('');
   const breaks = sc.gaps.map(g => `<div class="brk" style="left:${sc.f(g.s) * 100}%;width:${sc.G * 100}%"></div>`).join('');
   const breakLabels = sc.gaps.map(g => `<div class="brkl" style="left:${(sc.f(g.s) + sc.G / 2) * 100}%">⋯ ${dur(g.e - g.s)} idle</div>`).join('');

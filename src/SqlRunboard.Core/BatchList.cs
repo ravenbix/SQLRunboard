@@ -205,13 +205,17 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         }
     }
 
-    /// <summary>"Load again": replaces the batch with its file on disk. Null if no batch has this id.</summary>
+    /// <summary>
+    /// "Load again": replaces the batch with its file on disk. Null if no batch has this id.
+    /// Throws InvalidOperationException while the run has Queued or Running scripts: the run locks the settings.
+    /// </summary>
     public Batch? Reload(int id)
     {
         lock (gate)
         {
             if (Find(id) is not { } b) return null;
             if (b.File is null) throw new ArgumentException("The batch has no file.");
+            if (b.Run?.Active == true) throw new InvalidOperationException("The run locks the batch. Load it again after the run.");
             return Put(Load(b));
         }
     }
@@ -377,7 +381,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         {
             if (runs.GetValueOrDefault(id) is { } run && Find(id) is { } batch)
             {
-                run.Settings = batch.Settings; // reruns use the current parallel limit, stop setting and timeout
+                run.Settings = batch.Settings with { Target = run.Settings.Target }; // reruns use the current parallel limit, stop setting and timeout
                 foreach (var path in paths(run))
                     if (run.Scripts.TryGetValue(path, out var s) && s.Status is ScriptStatus.Succeeded or ScriptStatus.Failed or ScriptStatus.Cancelled)
                     {

@@ -356,6 +356,24 @@ public sealed class RunTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Load_again_is_refused_while_the_run_has_Queued_or_Running_scripts()
+    {
+        var b = NewBatch(1, "a.sql", "b.sql");
+        Script("a.sql", 5);
+        var file = Path.Combine(root, "x.sqlrunboard.json");
+        b = list.Save(b.Id, file, overwrite: false)!;
+        list.Run(b.Id);
+        File.WriteAllText(file, BatchFile.Format(b.Settings with { Target = b.Settings.Target with { Server = "other" } }, b.Scripts));
+
+        Assert.Throws<InvalidOperationException>(() => list.Reload(b.Id));
+
+        time.Advance(TimeSpan.FromSeconds(5));
+        await Until(b.Id, r => !r.Active);
+        Assert.All(executor.Calls, c => Assert.Null(c.Connection.Target.Server)); // b.sql runs against the target of the run
+        Assert.True(list.Reload(b.Id)!.Run!.Ended); // after the run: Load again works and ends the run
+    }
+
+    [Fact]
     public async Task Load_again_with_another_target_ends_the_run()
     {
         var b = NewBatch(4, "a.sql");

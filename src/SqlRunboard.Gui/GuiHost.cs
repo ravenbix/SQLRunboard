@@ -175,11 +175,11 @@ public sealed class GuiHost : IAsyncDisposable
         };
     }
 
-    /// <summary>A batch file command: the batch, or a problem whose detail the page shows. 409: the file changed on disk.</summary>
+    /// <summary>A batch file command: the batch, or a problem whose detail the page shows. 409: the file changed on disk, or the run locks the batch.</summary>
     static IResult FileResult(Func<Batch?> command)
     {
         try { return command() is { } b ? Results.Ok(b) : Results.NotFound(); }
-        catch (BatchFileChangedException e) { return Results.Problem(e.Message, statusCode: StatusCodes.Status409Conflict); }
+        catch (Exception e) when (e is BatchFileChangedException or InvalidOperationException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status409Conflict); }
         catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status404NotFound); }
         catch (Exception e) when (e is ArgumentException or InvalidDataException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status400BadRequest); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status500InternalServerError); }

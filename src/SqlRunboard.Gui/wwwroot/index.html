@@ -699,7 +699,7 @@ function renderDialog() {
       <p class="muted" style="font-size:12px">Type or paste a path, or select a ${EXT} file.</p>
       ${fileList(d)}<div class="btns"><button data-dlg="cancel">Cancel</button><button class="primary" data-dlg="ok">Open</button></div>`,
     changed: () => `<h2 id="dlg-t">The file changed on disk</h2><p class="tnum">${esc(d.b.file)}</p><p>Another program changed the file after the app loaded it.</p>
-      <div class="btns"><button data-dlg="cancel">Cancel</button><button data-dlg="reload">Load again</button><button class="primary" data-dlg="ok">Overwrite</button></div>`,
+      <div class="btns"><button data-dlg="cancel">Cancel</button><button data-dlg="reload" ${locked(d.b) ? 'disabled' : ''}>Load again</button><button class="primary" data-dlg="ok">Overwrite</button></div>`,
     folder: () => `<h2 id="dlg-t">Select a folder</h2><p class="tnum">${esc(d.path)}</p>
       <div role="group" aria-label="Folders" style="max-height:50vh;overflow:auto;display:flex;flex-direction:column;align-items:flex-start">
         ${d.parent ? `<button data-folder="${esc(d.parent)}">⬑ ..</button>` : ''}${d.folders.map(f => `<button data-folder="${esc(f.path)}">${esc(f.name)}</button>`).join('')}</div>

@@ -609,12 +609,10 @@ function renderDrawer(b) {
   else if (!r.attempts.length && r.error) body = `<div class="Error">${esc(r.error)}</div>`; // did not start
   for (const at of r.attempts) {
     body += `<div class="sep" id="att-${at.n}">Attempt ${at.n}${at.start != null ? ` · ${clock(b.run, at.start)}` : ''} · ${at.status}</div>`;
-    if (at.restored) body += `${at.error ? `<div class="Error">${lineLink(at.error)}</div>` : ''}<div class="muted">Full messages: <a href="#" data-cmd="runlog">run.log</a></div>`;
-    else {
-      const ms = b.msgs[x.path]?.[at.n];
-      if (ms?.earlier) body += `<div class="muted">${ms.earlier.toLocaleString()} earlier messages are in run.log</div>`;
-      body += (ms?.list ?? []).map(m => `<div class="${m.kind}"><span class="muted tnum">${new Date(m.time).toLocaleTimeString([], { hour12: false })}</span> ${m.kind === 'Error' ? lineLink(m.text) : esc(m.text)}</div>`).join('');
-    }
+    const ms = b.msgs[x.path]?.[at.n];
+    if (ms?.earlier) body += `<div class="muted">${ms.earlier.toLocaleString()} earlier messages are in run.log</div>`;
+    body += (ms?.list ?? []).map(m => `<div class="${m.kind}"><span class="muted tnum">${new Date(m.time).toLocaleTimeString([], { hour12: false })}</span> ${m.kind === 'Error' ? lineLink(m.text) : esc(m.text)}</div>`).join('');
+    if (!ms && at.error) body += `<div class="Error">${esc(at.error)}</div>`; // a run from summary.csv after a restart has no messages
   }
   return `<div class="dh"><div class="t">${bubble(r.status)}<span>${esc(x.path)}</span></div>
     <button data-cmd="dCancel" ${live && (r.status === 'Queued' || (r.status === 'Running' && a.rollback == null)) ? '' : 'disabled'}>Cancel</button>

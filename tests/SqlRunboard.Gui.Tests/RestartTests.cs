@@ -47,6 +47,8 @@ public class RestartTests : AppPageTest
         await page.Locator("#tabs").GetByRole(AriaRole.Tab, new() { Name = "Run" }).ClickAsync();
         await Expect(page.Locator("#panel [data-path='2.sql']")).ToHaveAttributeAsync("aria-label", new System.Text.RegularExpressions.Regex("^2.sql, Cancelled, attempt 1"));
         await Expect(page.Locator("#hdr").GetByRole(AriaRole.Button, new() { Name = "Rerun all failed" })).ToBeEnabledAsync();
+        await page.Locator("#panel [data-path='2.sql']").ClickAsync();
+        await Expect(page.Locator("#drawer .msgs .Error")).ToHaveTextAsync("The app stopped"); // the error of the attempt, from summary.csv
 
         await side.Nth(2).ClickAsync();
         await page.Locator("#tabs").GetByRole(AriaRole.Tab, new() { Name = "Run" }).ClickAsync();

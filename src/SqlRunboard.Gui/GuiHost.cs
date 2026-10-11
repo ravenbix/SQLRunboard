@@ -67,6 +67,7 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
         var app = builder.Build();
+        RestoreBatches(app.Services.GetRequiredService<BatchList>(), app.Services.GetRequiredService<AppSettings>());
         app.Use(RejectForeignRequests);
         app.Use(RequireToken(token));
         var files = new EmbeddedFileProvider(typeof(GuiHost).Assembly, "SqlRunboard.Gui.wwwroot");
@@ -142,6 +143,15 @@ public sealed class GuiHost : IAsyncDisposable
         var host = new GuiHost(app, new Uri(app.Urls.First()), token, lockPath);
         host.WriteLock();
         return host;
+    }
+
+    /// <summary>The side list comes back from the app settings, and each change of its batch files goes there.</summary>
+    static void RestoreBatches(BatchList list, AppSettings settings)
+    {
+        const string Name = "batchFiles";
+        var files = settings.Snapshot()[Name] as JsonArray ?? [];
+        list.Restore(files.Where(f => f?.GetValueKind() == JsonValueKind.String).Select(f => f!.GetValue<string>()));
+        list.FilesChanged = f => settings.Merge(new JsonObject { [Name] = new JsonArray([.. f.Select(x => (JsonNode)x)]) });
     }
 
     /// <summary>A batch file command: the batch, or a problem whose detail the page shows. 409: the file changed on disk.</summary>

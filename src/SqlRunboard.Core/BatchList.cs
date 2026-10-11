@@ -22,6 +22,32 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     readonly Dictionary<int, string> loaded = []; // batch id -> the file text that the app last read or wrote
     readonly HashSet<Task> finishing = []; // one per Running script: ends after Finish wrote its state and log
     int lastId, lastUntitled;
+    string[] files = [];
+
+    /// <summary>
+    /// Called (under the lock) with the batch file paths in side-list order each time they change. The app keeps them in its settings,
+    /// so Restore can bring the side list back after a restart. Unsaved batches have no file and do not come back.
+    /// </summary>
+    public Action<IReadOnlyList<string>>? FilesChanged { get; set; }
+
+    /// <summary>
+    /// The start of the app: adds the batch files in this order. A file that cannot be read stays in the list with a FileError.
+    /// </summary>
+    public void Restore(IEnumerable<string> paths)
+    {
+        lock (gate)
+            foreach (var file in paths.Where(p => Path.IsPathFullyQualified(p) && BatchFile.HasExtension(p)).Distinct(StringComparer.Ordinal))
+            {
+                var b = new Batch(++lastId, BatchFile.NameOf(file), file, Dirty: false, new BatchSettings(), Scripts: []);
+                try { b = LastRun(Load(b)); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException)
+                {
+                    b = b with { FileError = e is FileNotFoundException or DirectoryNotFoundException ? "File not found" : e.Message };
+                }
+                batches.Add(b);
+                Publish(new Change("batch", b));
+            }
+    }
 
     /// <summary>The server keeps the last 10,000 messages of each attempt. run.log has all of them.</summary>
     public const int MaxMessages = 10_000;
@@ -208,7 +234,29 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         var text = File.ReadAllText(b.File!);
         var (settings, scripts) = BatchFile.Parse(text);
         loaded[b.Id] = text;
-        return b with { Dirty = false, Settings = settings, Scripts = Merge(scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)), Run = EndRun(b, settings) };
+        return b with { Dirty = false, Settings = settings, Scripts = Merge(scripts, FileScan.Scan(FolderPath(b.File, settings.Folder), settings.Filters, settings.Recurse)), Run = EndRun(b, settings), FileError = null };
+    }
+
+    /// <summary>
+    /// Call under the lock, at the start. The batch gets the run in its newest summary.csv. The rerun commands work on that run,
+    /// in its log folder, unless the server or database in the file is not the target of the batch: then the run has ended.
+    /// </summary>
+    Batch LastRun(Batch b)
+    {
+        if (RunLog.Newest(Path.GetDirectoryName(b.File)!, b.Name) is not { } folder) return b;
+        List<ScriptRun> scripts;
+        string server, database;
+        try { (scripts, server, database) = RunLog.ReadSummary(folder); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or FormatException or ArgumentException or OverflowException) { return b; } // no last run to show
+        var start = scripts.SelectMany(s => s.Attempts).Select(a => a.Start).DefaultIfEmpty(time.GetUtcNow()).Min();
+        var target = b.Settings.Target;
+        var ended = scripts.Count > 0 && (server != (target.Server ?? "") || database != (target.Database ?? ""));
+        if (!ended)
+        {
+            var run = runs[b.Id] = new ActiveRun(start, FolderPath(b.File, b.Settings.Folder) ?? "", b.Settings, RunLog.Open(folder, time, text => Warn(b.Id, text)));
+            foreach (var s in scripts) run.Scripts[s.Path] = s;
+        }
+        return b with { Run = new RunState(start, time.GetUtcNow(), scripts, [], ended) };
     }
 
     /// <summary>"Remove from list". The file stays on disk. The run of the batch is cancelled. False if no batch has this id.</summary>
@@ -499,6 +547,10 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     void Publish(Change change)
     {
         foreach (var s in subscribers) s.Writer.TryWrite(change);
+        string[] now = [.. batches.Where(b => b.File is not null).Select(b => b.File!)];
+        if (now.SequenceEqual(files)) return;
+        files = now;
+        FilesChanged?.Invoke(now);
     }
 
     public sealed class Subscription(IReadOnlyList<Batch> snapshot, IReadOnlyList<AttemptMessages> messages, ChannelReader<Change> changes, Action unsubscribe) : IDisposable

@@ -211,7 +211,7 @@ const app = { ...PREFS, batches: [], cur: null, dialog: null, menu: null };
 // ---------- server state ----------
 // The server keeps all batch state. Each server batch merges into a page object that also keeps the view state (tab, selection, drawer).
 // The page uses the flat settings of the prototype; the server uses the batch file shape (target is nested).
-const toView = sb => ({ ...sb, run: toRun(sb.run), settings: { ...sb.settings, ...sb.settings.target, extra: sb.settings.target.extraConnectionString, timeoutSeconds: sb.settings.timeoutSeconds ?? '' } });
+const toView = sb => ({ ...sb, missing: !!sb.fileError, run: toRun(sb.run), settings: { ...sb.settings, ...sb.settings.target, extra: sb.settings.target.extraConnectionString, timeoutSeconds: sb.settings.timeoutSeconds ?? '' } });
 // The server run (ISO times) in the prototype shape: times are seconds from the start of the run.
 // run.t is "now" on the server clock: the page clock plus the offset that the last state gave (the tests use a fake server clock).
 function toRun(r) {
@@ -335,6 +335,16 @@ async function browse(b, path, kind = 'folder', resolve) {
   try { openDialog({ kind, b, name, resolve, ...await post('/api/folders', { path, files: kind === 'folder' ? null : '*' + EXT }) }); }
   catch { if (path) browse(b, null, kind, resolve); else { toast('The folder list is not available.'); resolve?.(false); } }
 }
+// The desktop shell: NativeWebView injects invokeCSharpAction at page load. The page sends { id, cmd, ... } and the shell
+// answers with shellReply(id, path), or null if you cancel. cmd: folder, open, saveAs (native dialogs), stopped (close the window).
+const inShell = () => typeof window.invokeCSharpAction === 'function';
+const shellWaits = {}; let shellId = 0;
+const shell = (cmd, args = {}) => new Promise(r => { const id = ++shellId; shellWaits[id] = r; invokeCSharpAction(JSON.stringify({ id, cmd, ...args })); });
+function shellReply(id, path) { const r = shellWaits[id]; delete shellWaits[id]; r?.(path); }
+function pickFolder(b) {
+  if (!inShell()) return browse(b, b.settings.folder);
+  shell('folder', { path: b.settings.folder }).then(p => { if (p) { b.settings.folder = p; saveSettings(b); render(); } });
+}
 // Batch files. The server reads and writes them; the page sends full paths.
 const EXT = '.sqlrunboard.json';
 const isAbs = p => /^([a-zA-Z]:[\\/]|[\\/])/.test(p ?? '');
@@ -345,8 +355,16 @@ function saveBatch(b, path = null, overwrite = false) { // Ctrl+S; an unsaved ba
     e => { if (e.status === 409) openDialog({ kind: 'changed', b, path }); else toast(e.message); return false; });
 }
 // resolve (optional) gets the result of the save, or null if you cancel the dialog.
-const saveAs = (b, resolve) => b && !b.missing && browse(b, b.file ?? (isAbs(b.settings.folder) ? b.settings.folder : null), 'saveAs', resolve);
-const openBatch = () => browse(cur(), cur()?.file ?? null, 'open');
+function saveAs(b, resolve) {
+  if (!b || b.missing) return;
+  const path = b.file ?? (isAbs(b.settings.folder) ? b.settings.folder : null);
+  if (!inShell()) return browse(b, path, 'saveAs', resolve);
+  shell('saveAs', { path, name: b.name + EXT }).then(p => { const saved = p ? saveBatch(b, p) : null; resolve?.(saved); }); // the native dialog asks before it overwrites
+}
+function openBatch() {
+  if (!inShell()) return browse(cur(), cur()?.file ?? null, 'open');
+  shell('open', { path: cur()?.file ?? null }).then(p => { if (!p) return; if (p.toLowerCase().endsWith(EXT)) openFile(p); else toast(`Open accepts only ${EXT} files.`); });
+}
 async function openFile(path) { // the server gives the existing entry if the file is already in the list
   try { const b = upsert(await post('/api/batches/open', { path })); app.cur = b.id; closeDialog(); } catch (e) { toast(e.message); }
 }
@@ -390,7 +408,7 @@ function batchStatus(b) {
   const c = counts(b); return c.Failed + c.Cancelled ? 'Failed' : 'Succeeded';
 }
 function progressText(b) {
-  if (b.missing) return 'File not found';
+  if (b.missing) return b.fileError;
   if (b.signing) return 'Signing in...';
   if (!b.run) return 'Not run yet';
   const c = counts(b), n = Object.keys(b.run.rs).length, bad = c.Failed + c.Cancelled;
@@ -442,7 +460,7 @@ function renderSide() {
 }
 function renderHeader(b) {
   if (!b) return '<p class="muted">No batch. Select New batch or Open.</p>';
-  if (b.missing) return `<h1>${esc(b.name)}</h1><div class="banner err">File not found: <span class="tnum">${esc(b.file)}</span>. The batch stays in the list, because the drive can come back. <button data-cmd="remove">Remove from list</button></div>`;
+  if (b.missing) return `<h1>${esc(b.name)}</h1><div class="banner err">${esc(b.fileError)}: <span class="tnum">${esc(b.file)}</span>. The batch stays in the list, because the drive can come back. <button data-cmd="remove">Remove from list</button></div>`;
   const s = b.settings, c = counts(b), run = b.run, n = run ? Object.keys(run.rs).length : 0, live = run && !run.ended, bad = c.Failed + c.Cancelled;
   const seg = (k, v) => n ? `<i style="width:${100 * v / n}%;background:var(${CVAR[k]})"></i>` : '';
   return `<h1>${esc(b.name)}${b.dirty ? ' •' : ''}</h1>
@@ -750,6 +768,7 @@ async function quit() {
   try { await post('/api/quit'); } catch (e) { toast(e.message); return false; }
   es.close(); delete document.documentElement.dataset.connected;
   openDialog({ kind: 'stopped' });
+  if (inShell()) shell('stopped'); // the shell closes the window, also when the server is in another process
   return true;
 }
 function selectScript(b, path, openDrawer) { b.sel = path; if (openDrawer) b.drawer = true; render(); }
@@ -772,7 +791,7 @@ function cmd(c, el) {
     case 'closeDrawer': b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel)}"]`)?.focus();
     case 'runlog': return todo();
     case 'test': return logon(b, r => { b.testMsg = `Connected. Server ${r.server}, database ${r.database}, login ${r.login}.`; });
-    case 'browse': return browse(b, b.settings.folder);
+    case 'browse': return pickFolder(b);
     case 'sortFiles': return sendEdit(`/api/batches/${b.id}/sort`, {});
   }
 }

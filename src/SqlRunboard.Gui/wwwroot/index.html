@@ -203,12 +203,10 @@ a[data-line] { color: inherit; text-decoration: underline; }
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const MOD = isMac ? '⌘' : 'Ctrl+';
 
-// ---------- settings.json stand-in ----------
-const store = {
-  get(k, d) { try { const v = localStorage.getItem('sqlrunboard-proto:' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem('sqlrunboard-proto:' + k, JSON.stringify(v)); } catch {} },
-};
-const app = { theme: store.get('theme', 'System'), view: store.get('view', 'board'), tlColumns: store.get('tlColumns', false), tlCollapse: store.get('tlCollapse', false), drawerWidth: store.get('drawerWidth', 360), batches: [], cur: null, dialog: null, menu: null };
+// ---------- app settings: settings.json in the app data folder. The snapshot gives them; each change goes to the server. ----------
+const PREFS = { theme: 'System', view: 'board', tlColumns: false, tlCollapse: false, drawerWidth: 360 };
+const store = { set(k, v) { sendEdit('/api/app-settings', { [k]: v }); } };
+const app = { ...PREFS, batches: [], cur: null, dialog: null, menu: null };
 // ---------- server state ----------
 // The server keeps all batch state. Each server batch merges into a page object that also keeps the view state (tab, selection, drawer).
 // The page uses the flat settings of the prototype; the server uses the batch file shape (target is nested).
@@ -240,13 +238,17 @@ async function post(url, body = {}) {
   }
   return res.json();
 }
+// The side list in the server order. A batch that is not in ids drops out.
+const reorder = ids => { app.batches = ids.map(id => app.batches.find(b => b.id === id)).filter(Boolean); };
 // SSE: the full state first ("snapshot"), then one event per change. EventSource sends the auth cookie and reconnects by itself.
 let es;
 function connect() {
   es = new EventSource('/events');
   es.addEventListener('snapshot', e => {
-    const ids = JSON.parse(e.data).batches.map(sb => upsert(sb).id);
-    app.batches = app.batches.filter(b => ids.includes(b.id));
+    const snap = JSON.parse(e.data);
+    for (const k in PREFS) if (k in snap.app) app[k] = snap.app[k];
+    applyTheme(); setDrawerWidth(app.drawerWidth);
+    reorder(snap.batches.map(sb => upsert(sb).id));
     if (!app.batches.some(b => b.id === app.cur)) app.cur = app.batches[0]?.id ?? null;
     document.documentElement.dataset.connected = ''; // tests wait for this
     render();
@@ -254,6 +256,7 @@ function connect() {
   es.addEventListener('batch', e => { upsert(JSON.parse(e.data)); render(); });
   es.addEventListener('remove', e => dropBatch(JSON.parse(e.data).id));
   es.addEventListener('warning', e => { const w = JSON.parse(e.data); toast(`${app.batches.find(b => b.id === w.id)?.name ?? 'Batch'}: ${w.text}`); });
+  es.addEventListener('order', e => { reorder(JSON.parse(e.data).ids); render(); });
   es.onerror = () => { delete document.documentElement.dataset.connected; };
 }
 
@@ -261,19 +264,12 @@ function connect() {
 const DONE = ['Succeeded', 'Failed', 'Cancelled'];
 const lastA = r => r.attempts[r.attempts.length - 1];
 const firstStart = r => Math.min(...r.attempts.filter(a => a.start != null).map(a => a.start));
-function moveIn(arr, item, dir) {
-  const i = arr.indexOf(item); if (i < 0) return false;
-  arr.splice(i, 1);
-  const j = dir === 'top' ? 0 : dir === 'bottom' ? arr.length : dir === 'up' ? Math.max(0, i - 1) : Math.min(arr.length, i + 1);
-  arr.splice(j, 0, item); return i !== j;
-}
 const canMove = (b, path) => b.run ? !b.run.ended && b.run.rs[path]?.status === 'Queued' : !locked(b) && !!b.scripts.find(x => x.path === path);
 const locked = b => !!b.signing || !!(b.run && b.run.live && !b.run.ended);
 const canRerun = (b, r) => DONE.includes(r.status) && !b.signing && !b.run.stale; // stale: the settings changed, so the run ended
 
 // ponytail: stand-ins for the commands of later tickets. Each ticket replaces its names with a POST.
 const todo = () => toast('Not available yet.');
-const move = todo, logon = todo;
 // Edits go to the server one at a time, in the order you make them. queued() gives the error to the caller; sendEdit() shows it.
 let edits = Promise.resolve();
 function queued(url, body) { const p = edits.then(() => post(url, body)); edits = p.catch(() => null); return p; }
@@ -282,15 +278,36 @@ function saveSettings(b) {
   b.saving = (b.saving ?? 0) + 1;
   sendEdit(`/api/batches/${b.id}/settings`, fromView(b.settings)).then(sb => { if (--b.saving) return; if (sb) upsert(sb); render(); });
 }
-async function runBatch(b) {
+// The logon check before a run, and Test connection. The server keeps the password; the page only passes it on from the dialog.
+async function logon(b, then, password = null) {
+  if (b.signing) return;
+  const token = {};
+  b.logonMsg = null; b.testMsg = null; b.signing = { token, text: 'Signing in...' };
+  render();
+  const r = await sendEdit(`/api/batches/${b.id}/logon`, { password });
+  if (b.signing?.token !== token) return; // cancelled: ignore the result
+  b.signing = null;
+  if (r?.logonFailed && b.settings.auth === 'SqlServer') openDialog({ kind: 'password', b, then, error: r.error });
+  else if (r?.error) b.logonMsg = r.error;
+  else if (r) then(r);
+  render();
+}
+function runBatch(b) {
   if (!b || b.missing || locked(b)) return;
-  const sb = await sendEdit(`/api/batches/${b.id}/run`, {});
-  if (sb) { upsert(sb); b.tab = 'run'; render(); }
+  logon(b, async () => {
+    const sb = await sendEdit(`/api/batches/${b.id}/run`, {});
+    if (sb) { upsert(sb); b.tab = 'run'; render(); }
+  });
 }
 const cancel = (b, path) => sendEdit(`/api/batches/${b.id}/cancel`, { path });
 const cancelAll = b => sendEdit(`/api/batches/${b.id}/cancel-all`, {});
-const rerun = (b, path) => sendEdit(`/api/batches/${b.id}/rerun`, { path });
-const rerunFailed = b => sendEdit(`/api/batches/${b.id}/rerun-failed`, {});
+// The server decides: during a run it moves a Queued script in the queue, otherwise it changes the start order. dir: up, down, top, bottom.
+const move = (b, path, dir) => path && sendEdit(`/api/batches/${b.id}/move`, { path, to: dir });
+const moveBatch = (b, dir) => sendEdit(`/api/batches/${b.id}/move-in-list`, { to: dir });
+// A rerun after the run ended checks the logon first, as Run does. A rerun during the run uses the kept password.
+const afterLogon = (b, go) => b.run?.ended ? logon(b, go) : go();
+const rerun = (b, path) => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun`, { path }));
+const rerunFailed = b => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun-failed`, {}));
 function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
 // The folder, Open and Save as dialogs: the server lists the folders (and the batch files). kind: folder, open or saveAs.
 async function browse(b, path, kind = 'folder', resolve) {
@@ -535,8 +552,8 @@ function renderSettings(b) {
     <div class="hint">The total time of one attempt, for all parts.</div>
     ${chk('stopOnFirstFailure', 'Stop the queue at the first failure')}${chk('confirmBeforeRun', 'Confirm before run')}
     <h3>Target</h3>${txt('server', 'Server')}${txt('database', 'Database')}
-    ${sel('auth', 'Logon', [['Integrated', 'Integrated (Windows or Kerberos)'], ['SqlServer', 'SQL Server'], ['EntraInteractive', 'Microsoft Entra ID, interactive'], ['EntraDefault', 'Microsoft Entra ID, default']])}
-    ${s.auth === 'SqlServer' || s.auth === 'EntraInteractive' ? txt('user', s.auth === 'SqlServer' ? 'User' : 'Account hint') : ''}
+    ${sel('auth', 'Logon', [['Integrated', 'Integrated (Windows or Kerberos)'], ['SqlServer', 'SQL Server']])}
+    ${s.auth === 'SqlServer' ? txt('user', 'User') : ''}
     ${s.auth === 'SqlServer' ? '<div class="hint">The app asks for the password at the first run and keeps it in memory.</div>' : ''}
     ${sel('encrypt', 'Encrypt', [['Mandatory', 'Mandatory'], ['Optional', 'Optional'], ['Strict', 'Strict']])}
     ${chk('trustServerCertificate', 'Trust server certificate')}${txt('extra', 'Additional connection string')}
@@ -573,7 +590,14 @@ function focusSel(el) {
   return `${scope.id ? '#' + scope.id : '.topbar'} [${a}="${CSS.escape(el.getAttribute(a))}"]`;
 }
 const refocus = sel => sel && document.querySelector(sel)?.focus({ preventScroll: true });
+// A rebuild between pointerdown and pointerup swaps the element under the pointer, and the browser then sends no click
+// (live runs rebuild every second). So hold the renders while a button is down, and render once when it comes up.
+// ponytail: a pointerdown with no pointerup (some scrollbars) holds the renders until the next click.
+let held = false;
+addEventListener('pointerdown', () => { held = true; }, true);
+for (const t of ['pointerup', 'pointercancel']) addEventListener(t, () => { held = false; setTimeout(render); }, true);
 function render(o = {}) {
+  if (held) return;
   const b = cur(), ae = document.activeElement, k = focusSel(ae);
   const panelEl = document.getElementById('panel'), drawerEl = document.getElementById('drawer');
   const msgsEl = drawerEl.querySelector('.msgs'), msgsBottom = msgsEl && msgsEl.scrollTop + msgsEl.clientHeight >= msgsEl.scrollHeight - 4, msgsTop = msgsEl?.scrollTop;
@@ -652,7 +676,7 @@ function dialogOk() {
   const d = app.dialog, v = document.getElementById('dlg-in')?.value ?? '';
   if (d.ask) return answer('ok');
   if (d.kind === 'stopped') return;
-  if (d.kind === 'password') { if (!v) return; d.b.password = v; app.dialog = null; renderDialog(); logon(d.b, d.then); return; }
+  if (d.kind === 'password') { if (!v) return; app.dialog = null; renderDialog(); logon(d.b, d.then, v); return; }
   if (d.kind === 'folder') { d.b.settings.folder = d.path; saveSettings(d.b); closeDialog(); return; }
   if (d.kind === 'confirm') { app.dialog = null; renderDialog(); d.then(); render(); return; }
   if (d.kind === 'saveAs') { if (!v.trim()) return; const r = d.resolve; d.resolve = null; closeDialog(); const saved = saveBatch(d.b, join(d.path, v.trim())); r?.(saved); return; }
@@ -723,9 +747,9 @@ function cmd(c, el) {
     case 'dRerun': rerun(b, b.sel); return render();
     case 'closeDrawer': b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel)}"]`)?.focus();
     case 'runlog': return todo();
-    case 'test': return logon(b, login => { b.testMsg = `Connected. Server ${b.settings.server.split('.')[0].toUpperCase()}, database ${b.settings.database}, login ${login}.`; });
+    case 'test': return logon(b, r => { b.testMsg = `Connected. Server ${r.server}, database ${r.database}, login ${r.login}.`; });
     case 'browse': return browse(b, b.settings.folder);
-    case 'sortFiles': b.scripts.sort((x, y) => x.path.localeCompare(y.path, undefined, { numeric: true, sensitivity: 'base' })); b.dirty = true; return render();
+    case 'sortFiles': return sendEdit(`/api/batches/${b.id}/sort`, {});
   }
 }
 
@@ -753,7 +777,7 @@ document.addEventListener('click', e => {
   const dv = t.closest('[data-dview]'); if (dv) { b.dview = dv.dataset.dview; b.hlLine = null; return render(); }
   const ln = t.closest('[data-line]'); if (ln) { e.preventDefault(); b.dview = 'script'; b.hlLine = b.scrollLine = +ln.dataset.line; return render(); }
   const dm = t.closest('[data-dmove]'); if (dm) { move(b, b.sel, dm.dataset.dmove); return render(); }
-  const fm = t.closest('[data-fmove]'); if (fm) { const s = b.scripts.find(x => x.path === b.fileSel); if (s && moveIn(b.scripts, s, fm.dataset.fmove)) b.dirty = true; return render(); }
+  const fm = t.closest('[data-fmove]'); if (fm) return move(b, b.fileSel, fm.dataset.fmove);
   if (t.matches('[data-include]')) return;
   const fr = t.closest('[data-file]'); if (fr) { b.fileSel = fr.dataset.file; render(); return document.querySelector(`[data-k="f:${CSS.escape(b.fileSel)}"]`)?.focus(); }
   const bar = t.closest('[data-att]'); if (bar) { b.scrollAttempt = +bar.dataset.att; return selectScript(b, bar.dataset.path, true); }
@@ -810,7 +834,7 @@ document.addEventListener('keydown', e => {
   const li = t.closest('#side [data-batch]');
   if (li) {
     const lb = app.batches.find(x => x.id === +li.dataset.batch), i = app.batches.indexOf(lb);
-    if (e.altKey && dirs[e.key]) { e.preventDefault(); moveIn(app.batches, lb, dirs[e.key]); render(); return document.querySelector(`[data-k="b:${lb.id}"]`)?.focus(); }
+    if (e.altKey && dirs[e.key]) { e.preventDefault(); return moveBatch(lb, dirs[e.key]); }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const nb = app.batches[i + (e.key === 'ArrowDown' ? 1 : -1)]; if (nb) { selectBatch(nb.id); document.querySelector(`[data-k="b:${nb.id}"]`)?.focus(); } }
     if (e.key === 'Delete') removeBatch(lb);
     return;
@@ -823,7 +847,7 @@ document.addEventListener('keydown', e => {
   const fr = t.closest('[data-file]');
   if (fr && b) {
     const list = b.scripts.map(s => s.path), i = list.indexOf(fr.dataset.file);
-    if (e.altKey && dirs[e.key]) { e.preventDefault(); if (!locked(b) && moveIn(b.scripts, b.scripts[i], dirs[e.key])) b.dirty = true; render(); }
+    if (e.altKey && dirs[e.key]) { e.preventDefault(); if (!locked(b)) move(b, list[i], dirs[e.key]); }
     else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); b.fileSel = list[Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; render(); }
     else if (e.key === ' ' && !locked(b) && b.scripts[i].state !== 'Missing') { e.preventDefault(); setInclude(b, b.scripts[i], !b.scripts[i].include); }
     else return;

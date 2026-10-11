@@ -22,9 +22,7 @@ GuiHost? host = null;
 var startUrl = GuiHost.FindRunningAsync(appData).GetAwaiter().GetResult();
 if (startUrl is null)
 {
-    var time = TimeProvider.System;
-    // ponytail: the fake executor runs until the real SQL Server adapter (ticket #7) replaces it.
-    host = GuiHost.StartAsync(new GuiHostOptions(appData, new FakeSqlExecutor(time), time)).GetAwaiter().GetResult();
+    host = GuiHost.StartAsync(new GuiHostOptions(appData, new SqlServerExecutor(), TimeProvider.System)).GetAwaiter().GetResult();
     startUrl = host.StartUrl;
 }
 

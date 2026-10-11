@@ -17,6 +17,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     readonly List<Batch> batches = [];
     readonly Dictionary<int, ActiveRun> runs = [];
     readonly List<Channel<Change>> subscribers = [];
+    readonly Dictionary<int, string> passwords = []; // in memory only: never in a Batch, a file or an event
     readonly Dictionary<int, string> loaded = []; // batch id -> the file text that the app last read or wrote
     readonly HashSet<Task> finishing = []; // one per Running script: ends after Finish wrote its state and log
     int lastId, lastUntitled;
@@ -43,14 +44,40 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     }
 
     /// <summary>
+    /// Test connection, and the logon check before a run. A password replaces the kept one; null uses the kept one.
+    /// A SQL Server logon with no password gives LogonFailed with no Error and no connection: ask for it.
+    /// The server keeps a password that works and forgets one that the server rejects. Null if no batch has this id.
+    /// </summary>
+    public async Task<SqlLogon?> LogonAsync(int id, string? password, CancellationToken ct)
+    {
+        BatchTarget target;
+        lock (gate)
+        {
+            if (Find(id) is not { } b) return null;
+            target = b.Settings.Target;
+            password ??= passwords.GetValueOrDefault(id);
+        }
+        if (target.Auth == Auth.SqlServer && password is null) return new SqlLogon(null, null, null, LogonFailed: true);
+        var logon = await executor.LogonAsync(new SqlConnectionSettings(target, password), ct);
+        lock (gate)
+        {
+            if (Find(id)?.Settings.Target != target) return logon; // the target changed meanwhile: keep nothing
+            if (logon.LogonFailed) passwords.Remove(id);
+            else if (logon.Error is null && password is not null) passwords[id] = password;
+        }
+        return logon;
+    }
+
+    /// <summary>
     /// Call under the lock. A change to the target or the file scan ends the current run: reruns do nothing until the next Run.
     /// The other settings apply to the next reruns. A run with Queued or Running scripts does not end.
     /// </summary>
     RunState? EndRun(Batch b, BatchSettings settings)
     {
         var (a, run) = (b.Settings, b.Run);
-        var ends = a.Target with { PasswordVariable = null } != settings.Target with { PasswordVariable = null }
-            || (a.Folder, a.Filters, a.Recurse) != (settings.Folder, settings.Filters, settings.Recurse);
+        var newTarget = a.Target with { PasswordVariable = null } != settings.Target with { PasswordVariable = null };
+        if (newTarget) passwords.Remove(b.Id); // a new target asks for the password again
+        var ends = newTarget || (a.Folder, a.Filters, a.Recurse) != (settings.Folder, settings.Filters, settings.Recurse);
         return ends && run is { Ended: false, Active: false } && runs.Remove(b.Id) ? run with { Ended = true } : run;
     }
 
@@ -59,6 +86,55 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     {
         lock (gate)
             return Replace(id, b => b with { Scripts = [.. b.Scripts.Select(s => s.Path == path ? s with { Include = include } : s)] });
+    }
+
+    /// <summary>
+    /// Moves one script. During a run it moves a Queued script in the queue of that run only. Otherwise it changes the start order.
+    /// Null if no batch has this id.
+    /// </summary>
+    public Batch? Move(int id, string path, MoveTo to)
+    {
+        lock (gate)
+        {
+            if (Find(id) is not { } b) return null;
+            if (b.Run?.Active == true)
+            {
+                if (runs.GetValueOrDefault(id) is { } run && MoveIn(run.Queue, p => p == path, to)) Pump(id, run);
+                return Find(id);
+            }
+            var scripts = b.Scripts.ToList();
+            return MoveIn(scripts, s => s.Path == path, to) ? Replace(id, x => x with { Scripts = scripts }) : b;
+        }
+    }
+
+    /// <summary>Moves a batch in the side list. SSE event "order" with the ids in the new order. False if no batch has this id.</summary>
+    public bool MoveBatch(int id, MoveTo to)
+    {
+        lock (gate)
+        {
+            if (Find(id) is null) return false;
+            if (MoveIn(batches, b => b.Id == id, to)) Publish(new Change("order", new { ids = batches.Select(b => b.Id).ToArray() }));
+            return true;
+        }
+    }
+
+    /// <summary>"Sort by file name": the start order becomes the natural sort. Null if no batch has this id.</summary>
+    public Batch? SortByFileName(int id)
+    {
+        lock (gate)
+            return Replace(id, b => b with { Scripts = [.. b.Scripts.OrderBy(s => s.Path, FileScan.NaturalOrder).ThenBy(s => s.Path, StringComparer.Ordinal)] });
+    }
+
+    /// <summary>Moves the first match. False if there is no match or it is already at that end.</summary>
+    static bool MoveIn<T>(List<T> list, Predicate<T> match, MoveTo to)
+    {
+        var i = list.FindIndex(match);
+        if (i < 0) return false;
+        var item = list[i];
+        list.RemoveAt(i);
+        var j = to switch { MoveTo.Top => 0, MoveTo.Bottom => list.Count, MoveTo.Up => Math.Max(0, i - 1), _ => Math.Min(list.Count, i + 1) };
+        list.Insert(j, item);
+        return i != j;
     }
 
     /// <summary>
@@ -78,10 +154,12 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             // ponytail: Save as over another existing file overwrites it without a question; ask first if users lose files that way.
             if (!overwrite && file == b.File && File.Exists(file) && File.ReadAllText(file) != loaded.GetValueOrDefault(id)) throw new BatchFileChangedException(file);
             var settings = b.Settings with { Folder = Rebase(b.File, file, b.Settings.Folder) };
-            var text = BatchFile.Format(settings, b.Scripts);
+            // Save removes the Missing entries and clears the New marks.
+            List<ScriptEntry> scripts = [.. b.Scripts.Where(s => s.State != ScriptState.Missing).Select(s => s with { State = null })];
+            var text = BatchFile.Format(settings, scripts);
             File.WriteAllText(file, text);
             loaded[id] = text;
-            var batch = batches[i] = b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings };
+            var batch = batches[i] = b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings, Scripts = scripts };
             Publish(new Change("batch", batch));
             return batch;
         }
@@ -137,6 +215,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         {
             if (batches.RemoveAll(b => b.Id == id) == 0) return false;
             loaded.Remove(id);
+            passwords.Remove(id);
             runs.Remove(id);
             Publish(new Change("remove", new { id }));
             return true;
@@ -184,7 +263,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             // ponytail: a log folder that cannot be made (read-only folder) stops the Run with the IO error; run without logs if users need that.
             var log = logParent is null ? null : RunLog.Create(logParent, b.Name, time, text => Warn(id, text));
             var run = runs[id] = new ActiveRun(time.GetUtcNow(), folder ?? "", b.Settings, log);
-            foreach (var s in scripts.Where(s => s.Include))
+            foreach (var s in scripts.Where(s => s.Include && s.State != ScriptState.Missing))
             {
                 run.Scripts[s.Path] = new ScriptRun(s.Path, ScriptStatus.Queued, []);
                 run.Queue.Add(s.Path);
@@ -310,7 +389,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             run.Add(path, new Attempt(start, null, ScriptStatus.Running, null, null));
             var attempt = Attempt(run, path);
             run.Log?.Append($"{attempt}: Started");
-            var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, Password: null));
+            var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, passwords.GetValueOrDefault(id)));
             // The continuation runs on the thread pool, never inline here under the lock.
             var cts = run.Tokens[path] = run.Settings.TimeoutSeconds is int s ? new CancellationTokenSource(TimeSpan.FromSeconds(s), time) : new CancellationTokenSource();
             Task? done = null;
@@ -340,6 +419,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             var a = run.Scripts[path].Attempts[^1];
             run.Log?.Append($"{Attempt(run, path)}: {a.Status}" + (a.Rows is { } rows ? $", {rows} rows" : "") + (a.Error is { } err ? $": {err}" : ""));
             run.Running--;
+            if (t.IsCompletedSuccessfully && t.Result.LogonFailed) passwords.Remove(id); // the page asks again at the next run
             if (run.Scripts[path].Status == ScriptStatus.Failed) run.Failed();
             Pump(id, run);
         }
@@ -360,12 +440,16 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     static string? FolderPath(string? batchFile, string? folder) =>
         string.IsNullOrWhiteSpace(folder) || batchFile is null ? folder : Path.Combine(Path.GetDirectoryName(batchFile)!, folder);
 
-    /// <summary>Known files keep their place and check box; new files go at the bottom in file-name order. Files not on disk drop out.</summary>
+    /// <summary>
+    /// Known files keep their place and check box; new files go at the bottom in file-name order, marked New.
+    /// Files not on disk stay, marked Missing, until the next save.
+    /// </summary>
     static IReadOnlyList<ScriptEntry> Merge(IReadOnlyList<ScriptEntry> known, IReadOnlyList<string> found)
     {
         var onDisk = found.ToHashSet(StringComparer.Ordinal);
         var old = known.Select(s => s.Path).ToHashSet(StringComparer.Ordinal);
-        return [.. known.Where(s => onDisk.Contains(s.Path)), .. found.Where(p => !old.Contains(p)).Select(p => new ScriptEntry(p, Include: true))];
+        return [.. known.Select(s => !onDisk.Contains(s.Path) ? s with { State = ScriptState.Missing } : s.State == ScriptState.Missing ? s with { State = null } : s),
+            .. found.Where(p => !old.Contains(p)).Select(p => new ScriptEntry(p, Include: true, ScriptState.New))];
     }
 
     /// <summary>The snapshot and the subscription are taken under one lock, so no change is lost between them.</summary>

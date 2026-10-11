@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -27,7 +28,10 @@ public sealed record FolderRequest(string? Path, string? Files = null);
 public sealed record PathRequest(string Path);
 /// <param name="Path">Null: Save to the current file. Otherwise Save as.</param>
 public sealed record SaveRequest(string? Path, bool Overwrite);
+public sealed record LogonRequest(string? Password);
 public sealed record ScriptRequest(string Path);
+public sealed record MoveRequest(string Path, MoveTo To);
+public sealed record MoveBatchRequest(MoveTo To);
 
 /// <summary>The local web server: Kestrel on 127.0.0.1, a random port, a random token. See docs/SPEC.md "GUI host".</summary>
 public sealed class GuiHost : IAsyncDisposable
@@ -59,6 +63,7 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.AddSingleton(options.Executor);
         builder.Services.AddSingleton(options.Time);
         builder.Services.AddSingleton(new BatchList(options.Executor, options.Time, options.AppDataFolder));
+        builder.Services.AddSingleton<AppSettings>();
         builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
         var app = builder.Build();
@@ -69,19 +74,33 @@ public sealed class GuiHost : IAsyncDisposable
         app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
 
         // Server to page: SSE. Page to server: POST with a JSON body, one route per command.
-        app.MapGet("/events", (BatchList list, CancellationToken ct) => TypedResults.ServerSentEvents(Events(list, ct)));
+        app.MapGet("/events", (BatchList list, AppSettings settings, CancellationToken ct) => TypedResults.ServerSentEvents(Events(list, settings, ct)));
+        app.MapPost("/api/app-settings", (JsonNode? changes, AppSettings settings) =>
+        {
+            if (changes is not JsonObject o) return Results.BadRequest();
+            settings.Merge(o);
+            return Results.NoContent();
+        });
         app.MapPost("/api/batches", (BatchList list) => list.NewBatch());
         app.MapPost("/api/batches/{id:int}/settings", (int id, BatchSettings settings, BatchList list) =>
             !settings.IsValid ? Results.BadRequest()
             : list.UpdateSettings(id, settings) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/include", (int id, IncludeRequest r, BatchList list) =>
             list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/logon", async (int id, LogonRequest r, BatchList list, CancellationToken ct) =>
+            await list.LogonAsync(id, r.Password, ct) is { } logon ? Results.Ok(logon) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/run", (int id, BatchList list) =>
             list.Run(id) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/cancel", (int id, ScriptRequest r, BatchList list) =>
             list.Cancel(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/cancel-all", (int id, BatchList list) =>
             list.CancelAll(id) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/move", (int id, MoveRequest r, BatchList list) =>
+            list.Move(id, r.Path, r.To) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/sort", (int id, BatchList list) =>
+            list.SortByFileName(id) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/move-in-list", (int id, MoveBatchRequest r, BatchList list) =>
+            list.MoveBatch(id, r.To) ? Results.Ok(new { }) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/rerun", (int id, ScriptRequest r, BatchList list) =>
             list.Rerun(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/rerun-failed", (int id, BatchList list) =>
@@ -166,10 +185,10 @@ public sealed class GuiHost : IAsyncDisposable
         JsonSerializer.Serialize(stream, new LockFile(BaseUrl, Token), JsonSerializerOptions.Web);
     }
 
-    static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, [EnumeratorCancellation] CancellationToken ct)
+    static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, AppSettings settings, [EnumeratorCancellation] CancellationToken ct)
     {
         using var sub = list.Subscribe();
-        yield return new SseItem<object>(new { batches = sub.Snapshot }, "snapshot");
+        yield return new SseItem<object>(new { batches = sub.Snapshot, app = settings.Snapshot() }, "snapshot");
         await foreach (var change in sub.Changes.ReadAllAsync(ct))
             yield return new SseItem<object>(change.Data, change.Kind);
     }
@@ -223,5 +242,37 @@ public sealed class GuiHost : IAsyncDisposable
     {
         await app.StopAsync();
         await app.DisposeAsync();
+    }
+}
+
+/// <summary>
+/// The app settings of the page (for example the last Run tab view), in <c>settings.json</c> in the app data folder.
+/// The page owns the names and values. A POST changes only the names that it sends. The batch file does not keep them.
+/// </summary>
+public sealed class AppSettings(GuiHostOptions options)
+{
+    public const string FileName = "settings.json";
+    readonly string path = Path.Combine(options.AppDataFolder, FileName);
+    readonly Lock gate = new();
+    JsonObject? values;
+
+    public JsonObject Snapshot() { lock (gate) return (JsonObject)Load().DeepClone(); }
+
+    public void Merge(JsonObject changes)
+    {
+        lock (gate)
+        {
+            var v = Load();
+            foreach (var (name, value) in changes) v[name] = value?.DeepClone();
+            File.WriteAllText(path, v.ToJsonString());
+        }
+    }
+
+    JsonObject Load()
+    {
+        if (values is null)
+            try { values = JsonNode.Parse(File.ReadAllText(path)) as JsonObject; }
+            catch (Exception e) when (e is IOException or JsonException) { } // missing or bad file: start empty
+        return values ??= [];
     }
 }

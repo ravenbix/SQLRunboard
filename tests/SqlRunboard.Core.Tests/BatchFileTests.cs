@@ -156,6 +156,17 @@ public sealed class BatchFileTests : IDisposable
     }
 
     [Fact]
+    public void On_Windows_and_macOS_the_same_file_with_another_letter_case_gives_the_existing_entry()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows() || OperatingSystem.IsMacOS(), "File names on Linux are case-sensitive.");
+        File.WriteAllText(Path.Combine(root, "deploy.sqlrunboard.json"), """{ "version": 1 }""");
+
+        var first = list.Open(Path.Combine(root, "deploy.sqlrunboard.json"));
+
+        Assert.Equal(first.Id, list.Open(Path.Combine(root, "DEPLOY.sqlrunboard.json")).Id);
+    }
+
+    [Fact]
     public void Open_accepts_only_batch_files()
     {
         File.WriteAllText(Path.Combine(root, "x.json"), "{}");

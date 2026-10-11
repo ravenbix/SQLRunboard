@@ -38,7 +38,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     public void Restore(IEnumerable<string> paths)
     {
         lock (gate)
-            foreach (var file in paths.Where(p => Path.IsPathFullyQualified(p) && BatchFile.HasExtension(p)).Distinct(StringComparer.Ordinal))
+            foreach (var file in paths.Where(p => Path.IsPathFullyQualified(p) && BatchFile.HasExtension(p)).Distinct(FileNames))
             {
                 var b = new Batch(++lastId, BatchFile.NameOf(file), file, Dirty: false, new BatchSettings(), Scripts: []);
                 try { b = LastRun(Load(b)); }
@@ -49,6 +49,9 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
                 Put(b);
             }
     }
+
+    /// <summary>Batch file paths: Windows and macOS file names ignore the letter case. Script paths in a batch do not (docs/SPEC.md "Batch").</summary>
+    static readonly StringComparer FileNames = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     /// <summary>The server keeps the last 10,000 messages of each attempt. run.log has all of them.</summary>
     public const int MaxMessages = 10_000;
@@ -199,8 +202,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         var file = Path.GetFullPath(path);
         lock (gate)
         {
-            // ponytail: an ordinal path compare; the same file with another letter case on Windows or macOS gets a second entry.
-            if (batches.Find(b => b.File == file) is { } open) return open;
+            if (batches.Find(b => FileNames.Equals(b.File, file)) is { } open) return open;
             return Put(Load(new Batch(++lastId, BatchFile.NameOf(file), file, Dirty: false, new BatchSettings(), Scripts: [])));
         }
     }

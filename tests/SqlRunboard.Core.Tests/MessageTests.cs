@@ -65,6 +65,39 @@ public sealed class MessageTests : IDisposable
         Assert.Equal(["hello", "3 rows affected", "line 2 (part 1): boom"], kept.Messages.Select(m => m.Text));
     }
 
+    [Fact]
+    public async Task An_attempt_keeps_its_last_10000_messages_and_counts_the_earlier_ones()
+    {
+        var b = NewBatch("a.sql");
+        executor.Scripts["a.sql"] = new FakeScript { Messages = [.. Enumerable.Range(1, BatchList.MaxMessages + 5).Select(i => Info($"m{i}"))] };
+
+        list.Run(b.Id);
+        await ReadUntil(c => Ended(c, 1));
+
+        using var late = list.Subscribe();
+        var kept = Assert.Single(late.Messages);
+        Assert.Equal(5, kept.Earlier);
+        Assert.Equal(10_000, kept.Messages.Count);
+        Assert.Equal(("m6", "m10005"), (kept.Messages[0].Text, kept.Messages[^1].Text));
+    }
+
+    [Fact]
+    public async Task Errors_of_the_engine_are_messages_of_their_attempt_too()
+    {
+        var b = NewBatch("1-slow.sql", "2-gone.sql");
+        list.UpdateSettings(b.Id, b.Settings with { TimeoutSeconds = 3, ParallelLimit = 1 });
+        executor.Scripts["1-slow.sql"] = new FakeScript { Duration = TimeSpan.FromSeconds(60) };
+        list.Run(b.Id);
+        File.Delete(Path.Combine(root, "2-gone.sql")); // the Queued script fails when it starts
+        time.Advance(TimeSpan.FromSeconds(3));
+        await ReadUntil(c => Ended(c, 1));
+
+        using var late = list.Subscribe();
+        Assert.Equal([("1-slow.sql", 1, "Timeout after 3 s"), ("2-gone.sql", 1, "File not found")],
+            late.Messages.Select(m => (m.Path, m.Attempt, Assert.Single(m.Messages).Text)));
+        Assert.All(late.Messages, m => Assert.Equal(SqlMessageKind.Error, m.Messages[0].Kind));
+    }
+
     public void Dispose()
     {
         sub.Dispose();

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>sqlrunboard</AssemblyName>
+    <RootNamespace>SqlRunboard</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SqlRunboard.Gui/SqlRunboard.Gui.csproj" />
+  </ItemGroup>
+</Project>

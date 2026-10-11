@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <PackageReference Include="xunit.v3" Version="4.0.2" />
+    <PackageReference Include="Microsoft.Playwright.Xunit.v3" Version="1.63.0" />
+    <ProjectReference Include="../../src/SqlRunboard.Gui/SqlRunboard.Gui.csproj" />
+    <!-- ExecutableTests runs bin/sqlrunboard.dll as a process. -->
+    <ProjectReference Include="../../src/sqlrunboard/sqlrunboard.csproj" />
+    <!-- One fake clock for both test projects. -->
+    <Compile Include="../SqlRunboard.Core.Tests/FakeTime.cs" Link="FakeTime.cs" />
+  </ItemGroup>
+</Project>

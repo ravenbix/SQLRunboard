@@ -127,6 +127,33 @@ public class TimelineTests : AppPageTest
         await Expect(lastTick).ToHaveTextAsync("2:20");
     }
 
+    [Fact]
+    public async Task A_click_on_a_bar_opens_the_drawer_at_that_attempt_with_the_selection_of_the_board()
+    {
+        App.Executor.Scripts["a.sql"] = new FakeScript { Duration = TimeSpan.FromSeconds(10), Status = ScriptStatus.Failed, Error = "boom", Messages = [.. Enumerable.Range(1, 100).Select(i => new SqlMessage(SqlMessageKind.Info, $"m{i}"))] };
+        var b = NewBatch(1, "a.sql", "b.sql");
+        App.Host.Batches.Run(b.Id);
+        await OpenTimeline(b.Name);
+        App.Time.Advance(TimeSpan.FromSeconds(10));
+        await Expect(Bars("a.sql").Locator(".i")).ToHaveTextAsync("✕");
+        App.Host.Batches.Rerun(b.Id, "a.sql");
+        await Expect(Bars("a.sql")).ToHaveCountAsync(2);
+        App.Time.Advance(TimeSpan.FromSeconds(10));
+        await Expect(Bars("a.sql").Last.Locator(".i")).ToHaveTextAsync("✕");
+
+        var drawer = Page.Locator("#drawer");
+        await Bars("a.sql").First.ClickAsync();
+        await Expect(drawer.Locator(".dh .t")).ToHaveTextAsync("✕a.sql");
+        await Expect(drawer.Locator("#att-1")).ToBeInViewportAsync(); // the drawer would show the end of attempt 2 without the scroll
+        await Expect(drawer.Locator("#att-2")).Not.ToBeInViewportAsync();
+        await Expect(Panel.Locator(".tlg > .c.issel .tnum")).ToHaveTextAsync("a.sql");
+
+        await Row("b.sql").ClickAsync();
+        await Expect(drawer.Locator(".dh .t")).ToHaveTextAsync("✓b.sql");
+        await Panel.GetByRole(AriaRole.Group, new() { Name = "View" }).GetByRole(AriaRole.Button, new() { Name = "Board" }).ClickAsync();
+        await Expect(Panel.Locator(".card.issel")).ToContainTextAsync("b.sql");
+    }
+
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();

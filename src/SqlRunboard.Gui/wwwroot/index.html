@@ -315,6 +315,16 @@ async function browse(b, path, kind = 'folder', resolve) {
   try { openDialog({ kind, b, name, resolve, ...await post('/api/folders', { path, files: kind === 'folder' ? null : '*' + EXT }) }); }
   catch { if (path) browse(b, null, kind, resolve); else { toast('The folder list is not available.'); resolve?.(false); } }
 }
+// The desktop shell: NativeWebView injects invokeCSharpAction at page load. The page sends { id, cmd, ... } and the shell
+// answers with shellReply(id, path), or null if you cancel. cmd: folder, open, saveAs (native dialogs), stopped (close the window).
+const inShell = () => typeof window.invokeCSharpAction === 'function';
+const shellWaits = {}; let shellId = 0;
+const shell = (cmd, args = {}) => new Promise(r => { const id = ++shellId; shellWaits[id] = r; invokeCSharpAction(JSON.stringify({ id, cmd, ...args })); });
+function shellReply(id, path) { const r = shellWaits[id]; delete shellWaits[id]; r?.(path); }
+function pickFolder(b) {
+  if (!inShell()) return browse(b, b.settings.folder);
+  shell('folder', { path: b.settings.folder }).then(p => { if (p) { b.settings.folder = p; saveSettings(b); render(); } });
+}
 // Batch files. The server reads and writes them; the page sends full paths.
 const EXT = '.sqlrunboard.json';
 const isAbs = p => /^([a-zA-Z]:[\\/]|[\\/])/.test(p ?? '');
@@ -748,7 +758,7 @@ function cmd(c, el) {
     case 'closeDrawer': b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel)}"]`)?.focus();
     case 'runlog': return todo();
     case 'test': return logon(b, r => { b.testMsg = `Connected. Server ${r.server}, database ${r.database}, login ${r.login}.`; });
-    case 'browse': return browse(b, b.settings.folder);
+    case 'browse': return pickFolder(b);
     case 'sortFiles': return sendEdit(`/api/batches/${b.id}/sort`, {});
   }
 }

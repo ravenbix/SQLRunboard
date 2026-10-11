@@ -268,7 +268,6 @@ const canRerun = (b, r) => DONE.includes(r.status) && !b.signing && !b.run.stale
 
 // ponytail: stand-ins for the commands of later tickets. Each ticket replaces its names with a POST.
 const todo = () => toast('Not available yet.');
-const logon = todo;
 // Edits go to the server one at a time, in the order you make them. queued() gives the error to the caller; sendEdit() shows it.
 let edits = Promise.resolve();
 function queued(url, body) { const p = edits.then(() => post(url, body)); edits = p.catch(() => null); return p; }
@@ -277,18 +276,36 @@ function saveSettings(b) {
   b.saving = (b.saving ?? 0) + 1;
   sendEdit(`/api/batches/${b.id}/settings`, fromView(b.settings)).then(sb => { if (--b.saving) return; if (sb) upsert(sb); render(); });
 }
-async function runBatch(b) {
+// The logon check before a run, and Test connection. The server keeps the password; the page only passes it on from the dialog.
+async function logon(b, then, password = null) {
+  if (b.signing) return;
+  const token = {};
+  b.logonMsg = null; b.testMsg = null; b.signing = { token, text: 'Signing in...' };
+  render();
+  const r = await sendEdit(`/api/batches/${b.id}/logon`, { password });
+  if (b.signing?.token !== token) return; // cancelled: ignore the result
+  b.signing = null;
+  if (r?.logonFailed && b.settings.auth === 'SqlServer') openDialog({ kind: 'password', b, then, error: r.error });
+  else if (r?.error) b.logonMsg = r.error;
+  else if (r) then(r);
+  render();
+}
+function runBatch(b) {
   if (!b || b.missing || locked(b)) return;
-  const sb = await sendEdit(`/api/batches/${b.id}/run`, {});
-  if (sb) { upsert(sb); b.tab = 'run'; render(); }
+  logon(b, async () => {
+    const sb = await sendEdit(`/api/batches/${b.id}/run`, {});
+    if (sb) { upsert(sb); b.tab = 'run'; render(); }
+  });
 }
 const cancel = (b, path) => sendEdit(`/api/batches/${b.id}/cancel`, { path });
 const cancelAll = b => sendEdit(`/api/batches/${b.id}/cancel-all`, {});
 // The server decides: during a run it moves a Queued script in the queue, otherwise it changes the start order. dir: up, down, top, bottom.
 const move = (b, path, dir) => path && sendEdit(`/api/batches/${b.id}/move`, { path, to: dir });
 const moveBatch = (b, dir) => sendEdit(`/api/batches/${b.id}/move-in-list`, { to: dir });
-const rerun = (b, path) => sendEdit(`/api/batches/${b.id}/rerun`, { path });
-const rerunFailed = b => sendEdit(`/api/batches/${b.id}/rerun-failed`, {});
+// A rerun after the run ended checks the logon first, as Run does. A rerun during the run uses the kept password.
+const afterLogon = (b, go) => b.run?.ended ? logon(b, go) : go();
+const rerun = (b, path) => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun`, { path }));
+const rerunFailed = b => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun-failed`, {}));
 function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
 // The folder, Open and Save as dialogs: the server lists the folders (and the batch files). kind: folder, open or saveAs.
 async function browse(b, path, kind = 'folder') {
@@ -532,8 +549,8 @@ function renderSettings(b) {
     <div class="hint">The total time of one attempt, for all parts.</div>
     ${chk('stopOnFirstFailure', 'Stop the queue at the first failure')}${chk('confirmBeforeRun', 'Confirm before run')}
     <h3>Target</h3>${txt('server', 'Server')}${txt('database', 'Database')}
-    ${sel('auth', 'Logon', [['Integrated', 'Integrated (Windows or Kerberos)'], ['SqlServer', 'SQL Server'], ['EntraInteractive', 'Microsoft Entra ID, interactive'], ['EntraDefault', 'Microsoft Entra ID, default']])}
-    ${s.auth === 'SqlServer' || s.auth === 'EntraInteractive' ? txt('user', s.auth === 'SqlServer' ? 'User' : 'Account hint') : ''}
+    ${sel('auth', 'Logon', [['Integrated', 'Integrated (Windows or Kerberos)'], ['SqlServer', 'SQL Server']])}
+    ${s.auth === 'SqlServer' ? txt('user', 'User') : ''}
     ${s.auth === 'SqlServer' ? '<div class="hint">The app asks for the password at the first run and keeps it in memory.</div>' : ''}
     ${sel('encrypt', 'Encrypt', [['Mandatory', 'Mandatory'], ['Optional', 'Optional'], ['Strict', 'Strict']])}
     ${chk('trustServerCertificate', 'Trust server certificate')}${txt('extra', 'Additional connection string')}
@@ -647,7 +664,7 @@ const fileList = d => `<p class="tnum">${esc(d.path)}</p><div role="group" aria-
   ${d.files.map(f => `<button class="tnum" data-pick="${esc(f.path)}">${esc(f.name)}</button>`).join('')}</div>`;
 function dialogOk() {
   const d = app.dialog, v = document.getElementById('dlg-in')?.value ?? '';
-  if (d.kind === 'password') { if (!v) return; d.b.password = v; app.dialog = null; renderDialog(); logon(d.b, d.then); return; }
+  if (d.kind === 'password') { if (!v) return; app.dialog = null; renderDialog(); logon(d.b, d.then, v); return; }
   if (d.kind === 'folder') { d.b.settings.folder = d.path; saveSettings(d.b); closeDialog(); return; }
   if (d.kind === 'confirm') { app.dialog = null; renderDialog(); d.then(); render(); return; }
   if (d.kind === 'saveAs') { if (!v.trim()) return; closeDialog(); saveBatch(d.b, join(d.path, v.trim())); return; }
@@ -701,7 +718,7 @@ function cmd(c, el) {
     case 'dRerun': rerun(b, b.sel); return render();
     case 'closeDrawer': b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel)}"]`)?.focus();
     case 'runlog': return todo();
-    case 'test': return logon(b, login => { b.testMsg = `Connected. Server ${b.settings.server.split('.')[0].toUpperCase()}, database ${b.settings.database}, login ${login}.`; });
+    case 'test': return logon(b, r => { b.testMsg = `Connected. Server ${r.server}, database ${r.database}, login ${r.login}.`; });
     case 'browse': return browse(b, b.settings.folder);
     case 'sortFiles': return sendEdit(`/api/batches/${b.id}/sort`, {});
   }

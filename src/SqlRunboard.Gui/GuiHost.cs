@@ -28,6 +28,7 @@ public sealed record FolderRequest(string? Path, string? Files = null);
 public sealed record PathRequest(string Path);
 /// <param name="Path">Null: Save to the current file. Otherwise Save as.</param>
 public sealed record SaveRequest(string? Path, bool Overwrite);
+public sealed record LogonRequest(string? Password);
 public sealed record ScriptRequest(string Path);
 public sealed record MoveRequest(string Path, MoveTo To);
 public sealed record MoveBatchRequest(MoveTo To);
@@ -86,6 +87,8 @@ public sealed class GuiHost : IAsyncDisposable
             : list.UpdateSettings(id, settings) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/include", (int id, IncludeRequest r, BatchList list) =>
             list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());
+        app.MapPost("/api/batches/{id:int}/logon", async (int id, LogonRequest r, BatchList list, CancellationToken ct) =>
+            await list.LogonAsync(id, r.Password, ct) is { } logon ? Results.Ok(logon) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/run", (int id, BatchList list) =>
             list.Run(id) is { } b ? Results.Ok(b) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/cancel", (int id, ScriptRequest r, BatchList list) =>

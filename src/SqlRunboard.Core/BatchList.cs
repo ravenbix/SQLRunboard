@@ -17,6 +17,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     readonly List<Batch> batches = [];
     readonly Dictionary<int, ActiveRun> runs = [];
     readonly List<Channel<Change>> subscribers = [];
+    readonly Dictionary<int, string> passwords = []; // in memory only: never in a Batch, a file or an event
     readonly Dictionary<int, string> loaded = []; // batch id -> the file text that the app last read or wrote
     int lastId, lastUntitled;
 
@@ -42,14 +43,40 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     }
 
     /// <summary>
+    /// Test connection, and the logon check before a run. A password replaces the kept one; null uses the kept one.
+    /// A SQL Server logon with no password gives LogonFailed with no Error and no connection: ask for it.
+    /// The server keeps a password that works and forgets one that the server rejects. Null if no batch has this id.
+    /// </summary>
+    public async Task<SqlLogon?> LogonAsync(int id, string? password, CancellationToken ct)
+    {
+        BatchTarget target;
+        lock (gate)
+        {
+            if (Find(id) is not { } b) return null;
+            target = b.Settings.Target;
+            password ??= passwords.GetValueOrDefault(id);
+        }
+        if (target.Auth == Auth.SqlServer && password is null) return new SqlLogon(null, null, null, LogonFailed: true);
+        var logon = await executor.LogonAsync(new SqlConnectionSettings(target, password), ct);
+        lock (gate)
+        {
+            if (Find(id)?.Settings.Target != target) return logon; // the target changed meanwhile: keep nothing
+            if (logon.LogonFailed) passwords.Remove(id);
+            else if (logon.Error is null && password is not null) passwords[id] = password;
+        }
+        return logon;
+    }
+
+    /// <summary>
     /// Call under the lock. A change to the target or the file scan ends the current run: reruns do nothing until the next Run.
     /// The other settings apply to the next reruns. A run with Queued or Running scripts does not end.
     /// </summary>
     RunState? EndRun(Batch b, BatchSettings settings)
     {
         var (a, run) = (b.Settings, b.Run);
-        var ends = a.Target with { PasswordVariable = null } != settings.Target with { PasswordVariable = null }
-            || (a.Folder, a.Filters, a.Recurse) != (settings.Folder, settings.Filters, settings.Recurse);
+        var newTarget = a.Target with { PasswordVariable = null } != settings.Target with { PasswordVariable = null };
+        if (newTarget) passwords.Remove(b.Id); // a new target asks for the password again
+        var ends = newTarget || (a.Folder, a.Filters, a.Recurse) != (settings.Folder, settings.Filters, settings.Recurse);
         return ends && run is { Ended: false, Active: false } && runs.Remove(b.Id) ? run with { Ended = true } : run;
     }
 
@@ -187,6 +214,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         {
             if (batches.RemoveAll(b => b.Id == id) == 0) return false;
             loaded.Remove(id);
+            passwords.Remove(id);
             runs.Remove(id);
             Publish(new Change("remove", new { id }));
             return true;
@@ -351,7 +379,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             run.Add(path, new Attempt(start, null, ScriptStatus.Running, null, null));
             var attempt = Attempt(run, path);
             run.Log?.Append($"{attempt}: Started");
-            var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, Password: null));
+            var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, passwords.GetValueOrDefault(id)));
             // The continuation runs on the thread pool, never inline here under the lock.
             var cts = run.Tokens[path] = run.Settings.TimeoutSeconds is int s ? new CancellationTokenSource(TimeSpan.FromSeconds(s), time) : new CancellationTokenSource();
             _ = executor.ExecuteAsync(execution, m => run.Log?.Append($"{attempt}: {(m.Kind == SqlMessageKind.Error ? "Error: " : "")}{m.Text}"), cts.Token)
@@ -378,6 +406,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             var a = run.Scripts[path].Attempts[^1];
             run.Log?.Append($"{Attempt(run, path)}: {a.Status}" + (a.Rows is { } rows ? $", {rows} rows" : "") + (a.Error is { } err ? $": {err}" : ""));
             run.Running--;
+            if (t.IsCompletedSuccessfully && t.Result.LogonFailed) passwords.Remove(id); // the page asks again at the next run
             if (run.Scripts[path].Status == ScriptStatus.Failed) run.Failed();
             Pump(id, run);
         }

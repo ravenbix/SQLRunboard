@@ -28,3 +28,30 @@ jobs:
       - run: dotnet test --no-build
         env:
           BROWSER: ${{ matrix.browser }}
+
+  # The integration suite against a real SQL Server, on Linux only (docs/SPEC.md "Tests").
+  # The SA password is a throwaway for this run's container, which only this job can reach.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      sql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Rb-${{ github.run_id }}-${{ github.run_attempt }}-Sql9
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -b -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1'"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - run: dotnet test --project tests/SqlRunboard.Integration.Tests
+        env:
+          SQLRUNBOARD_TEST_SQL: Server=localhost,1433;User ID=sa;Password=Rb-${{ github.run_id }}-${{ github.run_attempt }}-Sql9;TrustServerCertificate=true

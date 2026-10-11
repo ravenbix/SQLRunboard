@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The integration suite: a real SQL Server from SQLRUNBOARD_TEST_SQL (see compose.yaml). It is not in the solution, so
+       the root `dotnet test` runs without a server. Run it: dotnet test, project option, tests/SqlRunboard.Integration.Tests -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <PackageReference Include="xunit.v3" Version="4.0.2" />
+    <ProjectReference Include="../../src/SqlRunboard.Core/SqlRunboard.Core.csproj" />
+  </ItemGroup>
+</Project>

@@ -85,6 +85,29 @@ public sealed class RunTests : IAsyncDisposable
         Assert.Equal(["a.sql", "b.sql", "c.sql"], executor.Calls.Select(c => c.ScriptName));
     }
 
+    sealed class ThrowingExecutor : ISqlExecutor
+    {
+        public Task<SqlResult> ExecuteAsync(SqlExecution execution, Action<SqlMessage> onMessage, CancellationToken ct) => throw new InvalidOperationException("no connection");
+        public Task<SqlLogon> LogonAsync(SqlConnectionSettings connection, CancellationToken ct) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task An_executor_that_throws_at_once_fails_the_attempt_and_the_queue_continues()
+    {
+        var throwing = new BatchList(new ThrowingExecutor(), time);
+        Write("a.sql"); Write("b.sql");
+        var b = throwing.NewBatch();
+        throwing.UpdateSettings(b.Id, new BatchSettings { Folder = root, ParallelLimit = 1 });
+        using var changes = throwing.Subscribe();
+
+        throwing.Run(b.Id);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        RunState? run = null;
+        while (run is null) if ((await changes.Changes.ReadAsync(cts.Token)).Data is Batch { Run: { Active: false } r }) run = r;
+        Assert.All(run.Scripts, s => Assert.Equal((ScriptStatus.Failed, "no connection"), (s.Status, s.Attempts.Single().Error)));
+    }
+
     [Fact]
     public async Task A_script_is_sent_as_GO_parts_and_a_BOM_selects_the_encoding()
     {

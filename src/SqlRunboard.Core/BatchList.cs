@@ -460,10 +460,16 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             }
             starts.Add(() =>
             {
+                Task<SqlResult> task;
+                try { task = executor.ExecuteAsync(execution, OnMessage, cts.Token); }
+                catch (Exception e) { task = Task.FromException<SqlResult>(e); } // a throw before the first await fails the attempt too
                 Task? done = null;
                 // The continuation takes the lock, so it cannot remove 'done' before this method adds it.
-                done = executor.ExecuteAsync(execution, OnMessage, cts.Token)
-                    .ContinueWith(t => { Finish(id, run, path, start, t); lock (gate) finishing.Remove(done!); }, TaskScheduler.Default);
+                done = task.ContinueWith(t =>
+                {
+                    try { Finish(id, run, path, start, t); }
+                    finally { lock (gate) finishing.Remove(done!); }
+                }, TaskScheduler.Default);
                 finishing.Add(done);
             });
         }

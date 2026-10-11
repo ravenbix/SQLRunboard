@@ -95,6 +95,34 @@ public class RunViewTests : AppPageTest
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Table" })).ToHaveAttributeAsync("aria-pressed", "true");
     }
 
+    [Fact]
+    public async Task A_late_answer_to_Run_does_not_undo_the_newer_state_from_the_server()
+    {
+        File.WriteAllText(Path.Combine(scripts, "a.sql"), "select 1");
+        App.Executor.Scripts["a.sql"] = new FakeScript { Duration = TimeSpan.FromSeconds(10) };
+        var b = App.Host.Batches.NewBatch();
+        App.Host.Batches.UpdateSettings(b.Id, new BatchSettings { Folder = scripts });
+        var answer = new TaskCompletionSource();
+        await Page.RouteAsync("**/api/batches/*/run", async route =>
+        {
+            var res = await route.FetchAsync(); // the server state when the run started: a.sql Running
+            await answer.Task;
+            await route.FulfillAsync(new() { Response = res });
+        });
+        await Side(b.Name).ClickAsync();
+
+        await Page.Locator("#hdr").GetByRole(AriaRole.Button, new() { Name = "Run", Exact = true }).ClickAsync();
+        await Expect(Side(b.Name)).ToContainTextAsync("0/1"); // from the event stream
+        App.Time.Advance(TimeSpan.FromSeconds(10));
+        await Expect(Side(b.Name)).ToContainTextAsync("1/1");
+        answer.SetResult();
+
+        await Expect(Page.GetByRole(AriaRole.Tab, new() { Name = "Run" })).ToHaveAttributeAsync("aria-selected", "true"); // the page has the answer
+        await Expect(Side(b.Name)).ToContainTextAsync("1/1");
+        await Expect(Panel.Locator(".card:has-text('a.sql')")).ToContainTextAsync("attempt 1");
+        await Expect(Panel.GetByRole(AriaRole.Region, new() { Name = "Succeeded", Exact = true }).Locator(".card")).ToHaveCountAsync(1);
+    }
+
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();

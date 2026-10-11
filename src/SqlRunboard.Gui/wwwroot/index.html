@@ -226,6 +226,7 @@ const fromView = s => ({ folder: s.folder || null, filters: s.filters, recurse: 
   target: { server: s.server, database: s.database, auth: s.auth, user: s.user, passwordVariable: s.passwordVariable, encrypt: s.encrypt, trustServerCertificate: s.trustServerCertificate, extraConnectionString: s.extra } });
 function upsert(sb) {
   let b = app.batches.find(x => x.id === sb.id);
+  if (b && sb.version < b.version) return b; // an older state: a POST answer can come after newer events
   if (!b) app.batches.push(b = { missing: false, tab: null, sel: null, drawer: false, run: null, scripts: [], signing: null, logonMsg: null, testMsg: null, sort: null, fileSel: null });
   if (!b.msgs || sb.run?.start !== b.runStart) { b.msgs = {}; b.warnings = []; b.runStart = sb.run?.start; } // a new run: its messages come after this event
   const mine = b.saving ? b.settings : null; // while my settings are on the way, an older echo must not undo them

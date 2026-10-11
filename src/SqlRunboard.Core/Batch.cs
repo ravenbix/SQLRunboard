@@ -46,9 +46,10 @@ public enum ScriptState { New, Missing }
 /// <summary>
 /// One entry in the side list. File is null for an unsaved batch. Scripts is the start order. Run is the current run, or null.
 /// FileError: the app could not read the batch file at the start (for example "File not found"). The entry stays until you remove it.
+/// Version: each change of the batch gets a higher number, so the page can drop a state that is older than the one it has.
 /// </summary>
 public sealed record Batch(int Id, string Name, string? File, bool Dirty, BatchSettings Settings, IReadOnlyList<ScriptEntry> Scripts, RunState? Run = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? FileError = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? FileError = null, long Version = 0);
 
 /// <summary>The move commands of docs/SPEC.md "Script order". One item at a time.</summary>
 public enum MoveTo { Up, Down, Top, Bottom }

@@ -23,6 +23,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     readonly HashSet<Task> finishing = []; // one per Running script: ends after Finish wrote its state and log
     List<Change>? held; // while Pump starts executors: their first messages, to publish after the run state
     int lastId, lastUntitled;
+    long version;
     string[] files = [];
 
     /// <summary>
@@ -45,8 +46,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
                 {
                     b = b with { FileError = e is FileNotFoundException or DirectoryNotFoundException ? "File not found" : e.Message };
                 }
-                batches.Add(b);
-                Publish(new Change("batch", b));
+                Put(b);
             }
     }
 
@@ -57,10 +57,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     {
         lock (gate)
         {
-            var batch = new Batch(++lastId, $"Untitled {++lastUntitled}", File: null, Dirty: true, new BatchSettings(), Scripts: []);
-            batches.Add(batch);
-            Publish(new Change("batch", batch));
-            return batch;
+            return Put(new Batch(++lastId, $"Untitled {++lastUntitled}", File: null, Dirty: true, new BatchSettings(), Scripts: []));
         }
     }
 
@@ -177,9 +174,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         if (path is not null && !Path.IsPathFullyQualified(path)) throw new ArgumentException($"Type a full path: {path}");
         lock (gate)
         {
-            var i = batches.FindIndex(b => b.Id == id);
-            if (i < 0) return null;
-            var b = batches[i];
+            if (Find(id) is not { } b) return null;
             var file = path is null ? b.File ?? throw new ArgumentException("The batch has no file. Use Save as.")
                 : BatchFile.HasExtension(path) ? Path.GetFullPath(path) : Path.GetFullPath(path + BatchFile.Extension);
             // ponytail: Save as over another existing file overwrites it without a question; ask first if users lose files that way.
@@ -190,9 +185,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             var text = BatchFile.Format(settings, scripts);
             File.WriteAllText(file, text);
             loaded[id] = text;
-            var batch = batches[i] = b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings, Scripts = scripts };
-            Publish(new Change("batch", batch));
-            return batch;
+            return Put(b with { Name = BatchFile.NameOf(file), File = file, Dirty = false, Settings = settings, Scripts = scripts });
         }
     }
 
@@ -208,10 +201,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         {
             // ponytail: an ordinal path compare; the same file with another letter case on Windows or macOS gets a second entry.
             if (batches.Find(b => b.File == file) is { } open) return open;
-            var batch = Load(new Batch(++lastId, BatchFile.NameOf(file), file, Dirty: false, new BatchSettings(), Scripts: []));
-            batches.Add(batch);
-            Publish(new Change("batch", batch));
-            return batch;
+            return Put(Load(new Batch(++lastId, BatchFile.NameOf(file), file, Dirty: false, new BatchSettings(), Scripts: [])));
         }
     }
 
@@ -220,12 +210,9 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     {
         lock (gate)
         {
-            var i = batches.FindIndex(b => b.Id == id);
-            if (i < 0) return null;
-            if (batches[i].File is null) throw new ArgumentException("The batch has no file.");
-            var batch = batches[i] = Load(batches[i]);
-            Publish(new Change("batch", batch));
-            return batch;
+            if (Find(id) is not { } b) return null;
+            if (b.File is null) throw new ArgumentException("The batch has no file.");
+            return Put(Load(b));
         }
     }
 
@@ -290,12 +277,19 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     // Call under the lock.
     Batch? Replace(int id, Func<Batch, Batch> change)
     {
-        var i = batches.FindIndex(b => b.Id == id);
-        if (i < 0) return null;
-        if (batches[i].Run?.Active == true) return batches[i]; // the run locks the settings and the check boxes
-        var batch = batches[i] = change(batches[i]) with { Dirty = true };
-        Publish(new Change("batch", batch));
-        return batch;
+        if (Find(id) is not { } b) return null;
+        if (b.Run?.Active == true) return b; // the run locks the settings and the check boxes
+        return Put(change(b) with { Dirty = true });
+    }
+
+    // Call under the lock. Stores the batch with the next version (a new batch goes at the end of the list) and publishes it.
+    Batch Put(Batch b)
+    {
+        b = b with { Version = ++version };
+        var i = batches.FindIndex(x => x.Id == b.Id);
+        if (i < 0) batches.Add(b); else batches[i] = b;
+        Publish(new Change("batch", b));
+        return b;
     }
 
     /// <summary>
@@ -323,7 +317,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
                 run.Queue.Add(s.Path);
             }
             Pump(id, run);
-            return batches[i];
+            return Find(id);
         }
     }
 
@@ -479,9 +473,8 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         var messages = held;
         held = outer;
         run.Log?.Update(run.Scripts.Values, run.Settings.Target); // also for a run that is no longer current: its late ends go to its log
-        var i = batches.FindIndex(b => b.Id == id);
-        if (i >= 0 && runs.GetValueOrDefault(id) == run)
-            Publish(new Change("batch", batches[i] = batches[i] with { Run = new RunState(run.Start, time.GetUtcNow(), [.. run.Scripts.Values], [.. run.Queue]) }));
+        if (runs.GetValueOrDefault(id) == run && Find(id) is { } b)
+            Put(b with { Run = new RunState(run.Start, time.GetUtcNow(), [.. run.Scripts.Values], [.. run.Queue]) });
         foreach (var m in messages) Publish(m);
     }
 

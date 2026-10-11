@@ -86,27 +86,27 @@ public sealed class GuiHost : IAsyncDisposable
         app.MapPost("/api/batches", (BatchList list) => list.NewBatch());
         app.MapPost("/api/batches/{id:int}/settings", (int id, BatchSettings settings, BatchList list) =>
             !settings.IsValid ? Results.BadRequest()
-            : list.UpdateSettings(id, settings) is { } b ? Results.Ok(b) : Results.NotFound());
+            : Found(list.UpdateSettings(id, settings)));
         app.MapPost("/api/batches/{id:int}/include", (int id, IncludeRequest r, BatchList list) =>
-            list.SetInclude(id, r.Path, r.Include) is { } b ? Results.Ok(b) : Results.NotFound());
+            Found(list.SetInclude(id, r.Path, r.Include)));
         app.MapPost("/api/batches/{id:int}/logon", async (int id, LogonRequest r, BatchList list, CancellationToken ct) =>
-            await list.LogonAsync(id, r.Password, ct) is { } logon ? Results.Ok(logon) : Results.NotFound());
+            Found(await list.LogonAsync(id, r.Password, ct)));
         app.MapPost("/api/batches/{id:int}/run", (int id, BatchList list) =>
-            list.Run(id) is { } b ? Results.Ok(b) : Results.NotFound());
+            Found(list.Run(id)));
         app.MapPost("/api/batches/{id:int}/cancel", (int id, ScriptRequest r, BatchList list) =>
-            list.Cancel(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
+            Found(list.Cancel(id, r.Path)));
         app.MapPost("/api/batches/{id:int}/cancel-all", (int id, BatchList list) =>
-            list.CancelAll(id) is { } b ? Results.Ok(b) : Results.NotFound());
+            Found(list.CancelAll(id)));
         app.MapPost("/api/batches/{id:int}/move", (int id, MoveRequest r, BatchList list) =>
-            list.Move(id, r.Path, r.To) is { } b ? Results.Ok(b) : Results.NotFound());
+            Found(list.Move(id, r.Path, r.To)));
         app.MapPost("/api/batches/{id:int}/sort", (int id, BatchList list) =>
-            list.SortByFileName(id) is { } b ? Results.Ok(b) : Results.NotFound());
+            Found(list.SortByFileName(id)));
         app.MapPost("/api/batches/{id:int}/move-in-list", (int id, MoveBatchRequest r, BatchList list) =>
             list.MoveBatch(id, r.To) ? Results.Ok(new { }) : Results.NotFound());
         app.MapPost("/api/batches/{id:int}/rerun", (int id, ScriptRequest r, BatchList list) =>
-            list.Rerun(id, r.Path) is { } b ? Results.Ok(b) : Results.NotFound());
+            Found(list.Rerun(id, r.Path)));
         app.MapPost("/api/batches/{id:int}/rerun-failed", (int id, BatchList list) =>
-            list.RerunFailed(id) is { } b ? Results.Ok(b) : Results.NotFound());
+            Found(list.RerunFailed(id)));
         app.MapPost("/api/batches/open", (PathRequest r, BatchList list) => FileResult(() => list.Open(r.Path)));
         app.MapPost("/api/batches/{id:int}/save", (int id, SaveRequest r, BatchList list) => FileResult(() => list.Save(id, r.Path, r.Overwrite)));
         app.MapPost("/api/batches/{id:int}/reload", (int id, BatchList list) => FileResult(() => list.Reload(id)));
@@ -175,10 +175,13 @@ public sealed class GuiHost : IAsyncDisposable
         };
     }
 
+    /// <summary>200 with the result, or 404 when no batch has the id.</summary>
+    static IResult Found(object? result) => result is null ? Results.NotFound() : Results.Ok(result);
+
     /// <summary>A batch file command: the batch, or a problem whose detail the page shows. 409: the file changed on disk, or the run locks the batch.</summary>
     static IResult FileResult(Func<Batch?> command)
     {
-        try { return command() is { } b ? Results.Ok(b) : Results.NotFound(); }
+        try { return Found(command()); }
         catch (Exception e) when (e is BatchFileChangedException or InvalidOperationException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status409Conflict); }
         catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status404NotFound); }
         catch (Exception e) when (e is ArgumentException or InvalidDataException) { return Results.Problem(e.Message, statusCode: StatusCodes.Status400BadRequest); }

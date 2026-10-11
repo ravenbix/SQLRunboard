@@ -179,11 +179,14 @@ public class TimelineTests : AppPageTest
         var head = Panel.Locator(".tlg > .striphead");
         await Expect(head.Locator("svg.strip")).ToHaveCountAsync(1);
         await Expect(head.Locator(".axis span").First).ToHaveTextAsync("0:00");
-        var h = (await head.BoundingBoxAsync())!;
-        var chart = (await Row("a.sql").BoundingBoxAsync())!;
-        Assert.InRange(h.X, chart.X - 1, chart.X + 1);
-        Assert.InRange(h.Width, chart.Width - 1, chart.Width + 1);
-        Assert.True(h.Y + h.Height <= chart.Y + 1);
+        // Both boxes in one read: the live run rebuilds the panel each second, so two reads can get a removed node.
+        var box = await Panel.EvaluateAsync<double[]>("""
+            p => { const h = p.querySelector('.tlg > .striphead').getBoundingClientRect(), c = p.querySelector(".tlg > .chart[data-path='a.sql']").getBoundingClientRect();
+              return [h.x, h.width, h.bottom, c.x, c.width, c.y]; }
+            """);
+        Assert.InRange(box[0], box[3] - 1, box[3] + 1);
+        Assert.InRange(box[1], box[4] - 1, box[4] + 1);
+        Assert.True(box[2] <= box[5] + 1);
 
         await Toggle("Columns").UncheckAsync();
         await Expect(Panel.Locator(".tlg > .h")).ToHaveCountAsync(1);

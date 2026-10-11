@@ -8,20 +8,19 @@ public sealed record Change(string Kind, object Data);
 /// <summary>
 /// The side list: all batches, in the order you added them. The server keeps this state; the page shows it.
 /// Each subscriber gets the full state, then every change after it.
-/// It also runs the batches: each batch has its own queue and parallel limit, and many batches can run at once.
+/// It also runs the batches: the current run of each batch is a RunEngine with its own queue and parallel limit, and many batches can run at once.
 /// Each run writes a log folder next to the batch file, or for an unsaved batch in appDataFolder (no log if it is null).
 /// </summary>
 public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? appDataFolder = null)
 {
     readonly Lock gate = new();
     readonly List<Batch> batches = [];
-    readonly Dictionary<int, ActiveRun> runs = [];
-    readonly Dictionary<int, ActiveRun> shown = []; // the run that each batch shows: its messages stay when the run ends
+    readonly Dictionary<int, RunEngine> runs = []; // the current run of each batch
+    readonly Dictionary<int, RunEngine> shown = []; // the run that each batch shows: its messages stay when the run ends
     readonly List<Channel<Change>> subscribers = [];
     readonly Dictionary<int, string> passwords = []; // in memory only: never in a Batch, a file or an event
     readonly Dictionary<int, string> loaded = []; // batch id -> the file text that the app last read or wrote
     readonly HashSet<Task> finishing = []; // one per Running script: ends after Finish wrote its state and log
-    List<Change>? held; // while Pump starts executors: their first messages, to publish after the run state
     int lastId, lastUntitled;
     long version;
     string[] files = [];
@@ -134,7 +133,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             if (Find(id) is not { } b) return null;
             if (b.Run?.Active == true)
             {
-                if (runs.GetValueOrDefault(id) is { } run && MoveIn(run.Queue, p => p == path, to)) Pump(id, run);
+                runs.GetValueOrDefault(id)?.Move(path, to);
                 return Find(id);
             }
             var scripts = b.Scripts.ToList();
@@ -161,7 +160,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     }
 
     /// <summary>Moves the first match. False if there is no match or it is already at that end.</summary>
-    static bool MoveIn<T>(List<T> list, Predicate<T> match, MoveTo to)
+    internal static bool MoveIn<T>(List<T> list, Predicate<T> match, MoveTo to)
     {
         var i = list.FindIndex(match);
         if (i < 0) return false;
@@ -251,8 +250,8 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         var ended = scripts.Count > 0 && (server != (target.Server ?? "") || database != (target.Database ?? ""));
         if (!ended)
         {
-            var run = runs[b.Id] = shown[b.Id] = new ActiveRun(start, FolderPath(b.File, b.Settings.Folder) ?? "", b.Settings, RunLog.Open(folder, time, text => Warn(b.Id, text)));
-            foreach (var s in scripts) run.Scripts[s.Path] = s;
+            var run = runs[b.Id] = shown[b.Id] = new RunEngine(this, b.Id, start, FolderPath(b.File, b.Settings.Folder) ?? "", b.Settings, RunLog.Open(folder, time, text => Warn(b.Id, text)));
+            run.Restore(scripts);
         }
         return b with { Run = new RunState(start, time.GetUtcNow(), scripts, [], ended) };
     }
@@ -320,13 +319,8 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             var logParent = b.File is null ? appDataFolder : Path.GetDirectoryName(b.File);
             // ponytail: a log folder that cannot be made (read-only folder) stops the Run with the IO error; run without logs if users need that.
             var log = logParent is null ? null : RunLog.Create(logParent, b.Name, time, text => Warn(id, text));
-            var run = runs[id] = shown[id] = new ActiveRun(time.GetUtcNow(), folder ?? "", b.Settings, log);
-            foreach (var s in scripts.Where(s => s.Include)) // a missing file fails with "File not found" when it starts
-            {
-                run.Scripts[s.Path] = new ScriptRun(s.Path, ScriptStatus.Queued, []);
-                run.Queue.Add(s.Path);
-            }
-            Pump(id, run);
+            var run = runs[id] = shown[id] = new RunEngine(this, id, time.GetUtcNow(), folder ?? "", b.Settings, log);
+            run.Start(scripts.Where(s => s.Include).Select(s => s.Path)); // a missing file fails with "File not found" when it starts
             return Find(id);
         }
     }
@@ -338,21 +332,15 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     public Batch? Cancel(int id, string path) => Cancel(id, _ => [path]);
 
     /// <summary>Cancels all Running and Queued scripts of the current run. Null if no batch has this id.</summary>
-    public Batch? CancelAll(int id) => Cancel(id, run => [.. run.Queue, .. run.Tokens.Keys]);
+    public Batch? CancelAll(int id) => Cancel(id, run => run.Active);
 
-    Batch? Cancel(int id, Func<ActiveRun, IReadOnlyList<string>> paths)
+    Batch? Cancel(int id, Func<RunEngine, IReadOnlyList<string>> paths)
     {
         List<CancellationTokenSource> stop = [];
         Batch? batch;
         lock (gate)
         {
-            if (runs.GetValueOrDefault(id) is { } run)
-            {
-                foreach (var path in paths(run))
-                    if (run.Queue.Remove(path)) run.Scripts[path] = run.Scripts[path] with { Status = ScriptStatus.Cancelled };
-                    else if (run.Tokens.TryGetValue(path, out var cts) && run.Cancelled.Add(path)) stop.Add(cts);
-                Pump(id, run);
-            }
+            if (runs.GetValueOrDefault(id) is { } run) stop = run.Cancel(paths(run));
             batch = Find(id);
         }
         // Outside the lock: a real executor can block while it tells the server to stop.
@@ -378,152 +366,31 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
 
     /// <summary>Reruns all Failed and Cancelled scripts of the current run, in the start order. Null if no batch has this id.</summary>
     public Batch? RerunFailed(int id) =>
-        Rerun(id, run => [.. run.Scripts.Values.Where(s => s.Status is ScriptStatus.Failed or ScriptStatus.Cancelled).Select(s => s.Path)]);
+        Rerun(id, run => run.FailedOrCancelled);
 
-    // Reruns ignore the check boxes. They add attempts to the current run.
-    Batch? Rerun(int id, Func<ActiveRun, IReadOnlyList<string>> paths)
+    Batch? Rerun(int id, Func<RunEngine, IReadOnlyList<string>> paths)
     {
         lock (gate)
         {
-            if (runs.GetValueOrDefault(id) is { } run && Find(id) is { } batch)
-            {
-                run.Settings = batch.Settings with { Target = run.Settings.Target }; // reruns use the current parallel limit, stop setting and timeout
-                foreach (var path in paths(run))
-                    if (run.Scripts.TryGetValue(path, out var s) && s.Status is ScriptStatus.Succeeded or ScriptStatus.Failed or ScriptStatus.Cancelled)
-                    {
-                        run.Scripts[path] = s with { Status = ScriptStatus.Queued, Error = null };
-                        run.Queue.Add(path);
-                    }
-                Pump(id, run);
-            }
+            if (runs.GetValueOrDefault(id) is { } run && Find(id) is { } batch) run.Rerun(paths(run), batch.Settings);
             return Find(id);
         }
     }
 
-    /// <summary>The mutable state of a run. Change it only under the lock.</summary>
-    sealed class ActiveRun(DateTimeOffset start, string folder, BatchSettings settings, RunLog? log)
+    // The run engines share the lock and call these under it.
+    internal Lock Gate => gate;
+    internal TimeProvider Time => time;
+    internal ISqlExecutor Executor => executor;
+    internal HashSet<Task> Finishing => finishing;
+    internal string? Password(int id) => passwords.GetValueOrDefault(id);
+    internal void ForgetPassword(int id) => passwords.Remove(id);
+    /// <summary>Stores and publishes the state of the run, if it is the current run of the batch.</summary>
+    internal void Show(int id, RunEngine run)
     {
-        public RunLog? Log => log;
-        public DateTimeOffset Start => start;
-        public string Folder => folder;
-        public BatchSettings Settings { get; set; } = settings; // a rerun sets the current settings; they cannot change while scripts run
-        public OrderedDictionary<string, ScriptRun> Scripts { get; } = new(StringComparer.Ordinal); // the start order
-        public List<string> Queue { get; } = [];
-        public int Running { get; set; }
-        public HashSet<string> Cancelled { get; } = new(StringComparer.Ordinal); // Running scripts that you cancelled: not a timeout
-        public Dictionary<string, CancellationTokenSource> Tokens { get; } = new(StringComparer.Ordinal); // one per Running script
-        public Dictionary<(string Path, int Attempt), (Queue<RunMessage> Kept, int Earlier)> Messages { get; } = [];
-
-        public void Add(string path, Attempt a) { var s = Scripts[path]; Scripts[path] = s with { Status = a.Status, Attempts = [.. s.Attempts, a] }; }
-        /// <summary>"Stop the queue at the first failure": no new scripts start. The Running scripts continue.</summary>
-        public void Failed()
-        {
-            if (!Settings.StopOnFirstFailure) return;
-            foreach (var path in Queue) Scripts[path] = Scripts[path] with { Status = ScriptStatus.Cancelled, Error = "Not started: the queue stopped" };
-            Queue.Clear();
-        }
-        public void SetLast(string path, Attempt a) { var s = Scripts[path]; Scripts[path] = s with { Status = a.Status, Attempts = [.. s.Attempts.SkipLast(1), a] }; }
+        if (runs.GetValueOrDefault(id) == run && Find(id) is { } b) Put(b with { Run = run.State });
     }
-
-    // Call under the lock. Starts Queued scripts up to the parallel limit, then publishes the run.
-    // The executors start before the publish, so a Running script that a subscriber sees has started.
-    // Their messages wait until after the publish, so the page sees an attempt before its first message.
-    void Pump(int id, ActiveRun run)
-    {
-        List<Action> starts = [];
-        while (run.Running < run.Settings.ParallelLimit && run.Queue.Count > 0)
-        {
-            var path = run.Queue[0];
-            run.Queue.RemoveAt(0);
-            var start = time.GetUtcNow();
-            IReadOnlyList<ScriptPart> parts;
-            // Each script reads its file when it starts, so you can fix a Queued script.
-            // ponytail: the read runs under the lock; move it out if slow network folders block the page.
-            try { parts = SqlScript.Read(Path.Combine(run.Folder, path)); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-            {
-                var error = e is FileNotFoundException or DirectoryNotFoundException ? "File not found" : e.Message;
-                run.Add(path, new Attempt(start, start, ScriptStatus.Failed, null, error));
-                run.Log?.Append($"{Attempt(run, path)}: Failed: {error}");
-                var n = run.Scripts[path].Attempts.Count;
-                starts.Add(() => AddMessage(id, run, path, n, new(SqlMessageKind.Error, error)));
-                run.Failed();
-                continue;
-            }
-            run.Running++;
-            run.Add(path, new Attempt(start, null, ScriptStatus.Running, null, null));
-            var (attempt, number) = (Attempt(run, path), run.Scripts[path].Attempts.Count);
-            run.Log?.Append($"{attempt}: Started");
-            var execution = new SqlExecution(path, parts, new SqlConnectionSettings(run.Settings.Target, passwords.GetValueOrDefault(id)));
-            // The continuation runs on the thread pool, never inline here under the lock.
-            var cts = run.Tokens[path] = run.Settings.TimeoutSeconds is int s ? new CancellationTokenSource(TimeSpan.FromSeconds(s), time) : new CancellationTokenSource();
-            void OnMessage(SqlMessage m)
-            {
-                run.Log?.Append($"{attempt}: {(m.Kind == SqlMessageKind.Error ? "Error: " : "")}{m.Text}"); // outside the lock: a file write
-                lock (gate) AddMessage(id, run, path, number, m);
-            }
-            starts.Add(() =>
-            {
-                Task<SqlResult> task;
-                try { task = executor.ExecuteAsync(execution, OnMessage, cts.Token); }
-                catch (Exception e) { task = Task.FromException<SqlResult>(e); } // a throw before the first await fails the attempt too
-                Task? done = null;
-                // The continuation takes the lock, so it cannot remove 'done' before this method adds it.
-                done = task.ContinueWith(t =>
-                {
-                    try { Finish(id, run, path, start, t); }
-                    finally { lock (gate) finishing.Remove(done!); }
-                }, TaskScheduler.Default);
-                finishing.Add(done);
-            });
-        }
-        var outer = held;
-        held = [];
-        foreach (var a in starts) a();
-        var messages = held;
-        held = outer;
-        run.Log?.Update(run.Scripts.Values, run.Settings.Target); // also for a run that is no longer current: its late ends go to its log
-        if (runs.GetValueOrDefault(id) == run && Find(id) is { } b)
-            Put(b with { Run = new RunState(run.Start, time.GetUtcNow(), [.. run.Scripts.Values], [.. run.Queue]) });
-        foreach (var m in messages) Publish(m);
-    }
-
-    // Call under the lock. Keeps the last MaxMessages of the attempt, and sends the message to the page if the batch shows this run.
-    void AddMessage(int id, ActiveRun run, string path, int attempt, SqlMessage m)
-    {
-        var (kept, earlier) = run.Messages.GetValueOrDefault((path, attempt), ([], 0));
-        var message = new RunMessage(time.GetUtcNow(), m.Kind, m.Text);
-        kept.Enqueue(message);
-        if (kept.Count > MaxMessages) { kept.Dequeue(); earlier++; }
-        run.Messages[(path, attempt)] = (kept, earlier);
-        if (shown.GetValueOrDefault(id) != run) return;
-        var change = new Change("message", new ScriptMessage(id, path, attempt, message.Time, m.Kind, m.Text));
-        if (held is not null) held.Add(change); else Publish(change);
-    }
-
-    void Finish(int id, ActiveRun run, string path, DateTimeOffset start, Task<SqlResult> t)
-    {
-        lock (gate)
-        {
-            var end = time.GetUtcNow();
-            if (run.Tokens.Remove(path, out var cts)) cts.Dispose();
-            var cancelled = run.Cancelled.Remove(path);
-            run.SetLast(path, t.IsCompletedSuccessfully ? new Attempt(start, end, t.Result.Status, t.Result.Rows, t.Result.Error)
-                : t.IsCanceled && cancelled ? new Attempt(start, end, ScriptStatus.Cancelled, null, null)
-                : t.IsCanceled ? new Attempt(start, end, ScriptStatus.Failed, null, $"Timeout after {run.Settings.TimeoutSeconds} s")
-                : new Attempt(start, end, ScriptStatus.Failed, null, t.Exception!.GetBaseException().Message));
-            var a = run.Scripts[path].Attempts[^1];
-            if (!t.IsCompletedSuccessfully && a.Error is { } why) AddMessage(id, run, path, run.Scripts[path].Attempts.Count, new(SqlMessageKind.Error, why)); // the executor did not send it
-            run.Log?.Append($"{Attempt(run, path)}: {a.Status}" + (a.Rows is { } rows ? $", {rows} rows" : "") + (a.Error is { } err ? $": {err}" : ""));
-            run.Running--;
-            if (t.IsCompletedSuccessfully && t.Result.LogonFailed) passwords.Remove(id); // the page asks again at the next run
-            if (run.Scripts[path].Status == ScriptStatus.Failed) run.Failed();
-            Pump(id, run);
-        }
-    }
-
-    /// <summary>"1.sql #2": the script and the number of its last attempt, for run.log.</summary>
-    static string Attempt(ActiveRun run, string path) => $"{path} #{run.Scripts[path].Attempts.Count}";
+    /// <summary>True if the batch shows the messages of this run.</summary>
+    internal bool Shows(int id, RunEngine run) => shown.GetValueOrDefault(id) == run;
 
     /// <summary>A log write failed. The page shows the text; the run continues.</summary>
     void Warn(int id, string text)
@@ -556,13 +423,13 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         lock (gate)
         {
             subscribers.Add(channel);
-            List<AttemptMessages> messages = [.. shown.SelectMany(r => r.Value.Messages.Select(m => new AttemptMessages(r.Key, m.Key.Path, m.Key.Attempt, m.Value.Earlier, [.. m.Value.Kept])))];
+            List<AttemptMessages> messages = [.. shown.Values.SelectMany(r => r.Kept)];
             return new Subscription([.. batches], messages, channel.Reader, () => { lock (gate) subscribers.Remove(channel); });
         }
     }
 
     // Call under the lock, so each subscriber sees the changes in order.
-    void Publish(Change change)
+    internal void Publish(Change change)
     {
         foreach (var s in subscribers) s.Writer.TryWrite(change);
         string[] now = [.. batches.Where(b => b.File is not null).Select(b => b.File!)];

@@ -86,7 +86,7 @@ public class ExecutableTests
         try
         {
             var output = await exe.StandardOutput.ReadToEndAsync(Ct).WaitAsync(TimeSpan.FromSeconds(30), Ct);
-            await exe.WaitForExitAsync(Ct);
+            await exe.WaitForExitAsync(Ct).WaitAsync(TimeSpan.FromSeconds(30), Ct);
 
             Assert.Equal(0, exe.ExitCode);
             Assert.Equal($"SQLRunboard: {app.Host.StartUrl}", output.Trim());
@@ -106,10 +106,17 @@ public class ExecutableTests
             RedirectStandardError = true,
         };
         using var exe = Process.Start(psi)!;
-        var error = await exe.StandardError.ReadToEndAsync(Ct);
-        await exe.WaitForExitAsync(Ct);
+        try
+        {
+            var error = await exe.StandardError.ReadToEndAsync(Ct).WaitAsync(TimeSpan.FromSeconds(30), Ct);
+            await exe.WaitForExitAsync(Ct).WaitAsync(TimeSpan.FromSeconds(30), Ct);
 
-        Assert.Equal(2, exe.ExitCode);
-        Assert.Contains("Usage: sqlrunboard", error);
+            Assert.Equal(2, exe.ExitCode);
+            Assert.Contains("Usage: sqlrunboard", error);
+        }
+        finally
+        {
+            if (!exe.HasExited) exe.Kill(entireProcessTree: true);
+        }
     }
 }

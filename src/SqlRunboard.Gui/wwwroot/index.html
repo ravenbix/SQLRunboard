@@ -313,7 +313,7 @@ async function logon(b, then, password = null) {
 const confirmed = (b, n, go) => r => b.settings.confirmBeforeRun ? openDialog({ kind: 'confirm', b, login: r.login, n, then: go }) : go();
 function runBatch(b) {
   if (!b || b.missing || locked(b)) return;
-  logon(b, confirmed(b, b.scripts.filter(s => s.include && s.state !== 'Missing').length, async () => {
+  logon(b, confirmed(b, b.scripts.filter(s => s.include).length, async () => {
     const sb = await sendEdit(`/api/batches/${b.id}/run`, {});
     if (sb) { upsert(sb); b.tab = 'run'; render(); }
   }));
@@ -417,7 +417,7 @@ function progressText(b) {
 }
 // one row per script: the run rows, or the Queued rows before the first run
 function rowsFor(b) {
-  if (!b.run) return b.scripts.filter(s => s.include && s.state !== 'Missing').map((s, i) => ({ path: s.path, r: { status: 'Queued', attempts: [], virtual: true }, q: i + 1 }));
+  if (!b.run) return b.scripts.filter(s => s.include).map((s, i) => ({ path: s.path, r: { status: 'Queued', attempts: [], virtual: true }, q: i + 1 }));
   return Object.entries(b.run.rs).map(([path, r]) => ({ path, r, q: r.status === 'Queued' ? b.run.queue.indexOf(path) + 1 : null }));
 }
 function runOrder(b) { // start of the first attempt; Queued at the bottom in queue order

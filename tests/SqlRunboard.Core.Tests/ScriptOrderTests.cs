@@ -80,7 +80,8 @@ public sealed class ScriptOrderTests : IAsyncDisposable
         var scanned = list.Run(b.Id)!;
 
         Assert.Equal([new("a.sql", true, ScriptState.Missing), new("b.sql", true), new("c.sql", true, ScriptState.New), new("d.sql", true, ScriptState.New)], scanned.Scripts);
-        Assert.Equal(["b.sql", "c.sql", "d.sql"], scanned.Run!.Scripts.Select(s => s.Path)); // a missing file does not run
+        Assert.Equal(["a.sql", "b.sql", "c.sql", "d.sql"], scanned.Run!.Scripts.Select(s => s.Path)); // Run queues all included scripts
+        Assert.Equal((ScriptStatus.Failed, "File not found"), (scanned.Run.Scripts[0].Status, scanned.Run.Scripts[0].Attempts.Single().Error));
 
         var saved = list.Save(b.Id, null, overwrite: false)!;
 

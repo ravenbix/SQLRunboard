@@ -317,7 +317,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
             // ponytail: a log folder that cannot be made (read-only folder) stops the Run with the IO error; run without logs if users need that.
             var log = logParent is null ? null : RunLog.Create(logParent, b.Name, time, text => Warn(id, text));
             var run = runs[id] = shown[id] = new ActiveRun(time.GetUtcNow(), folder ?? "", b.Settings, log);
-            foreach (var s in scripts.Where(s => s.Include && s.State != ScriptState.Missing))
+            foreach (var s in scripts.Where(s => s.Include)) // a missing file fails with "File not found" when it starts
             {
                 run.Scripts[s.Path] = new ScriptRun(s.Path, ScriptStatus.Queued, []);
                 run.Queue.Add(s.Path);

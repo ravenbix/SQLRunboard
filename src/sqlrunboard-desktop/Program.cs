@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Templates;
+using Avalonia.Threading;
 using SqlRunboard.Core;
 using SqlRunboard.Gui;
 
@@ -40,6 +41,8 @@ lifetime.MainWindow = new Window
     Template = new FuncControlTemplate<Window>((w, _) => new ContentPresenter { [!ContentPresenter.ContentProperty] = w[!ContentControl.ContentProperty] }),
     Content = new NativeWebView { Source = startUrl },
 };
+// Quit in the page, Ctrl+C and SIGTERM stop the server: then the window closes too.
+host?.WaitForShutdownAsync().ContinueWith(_ => Dispatcher.UIThread.Post(() => lifetime.Shutdown()), TaskScheduler.Default);
 var code = lifetime.Start(args);
 if (host is not null) host.DisposeAsync().AsTask().GetAwaiter().GetResult();
 return code;

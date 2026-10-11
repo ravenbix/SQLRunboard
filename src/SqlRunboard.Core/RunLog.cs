@@ -43,7 +43,7 @@ sealed class RunLog
         var name = new Regex($@"^{Regex.Escape(batchName)}_\d{{8}}-\d{{6}}(-\d+)?$");
         // ponytail: the newest by folder name (local start time); a run in the repeated hour at a DST change can sort wrong.
         return Directory.EnumerateDirectories(logs).Where(d => name.IsMatch(Path.GetFileName(d)) && File.Exists(Path.Combine(d, SummaryFile)))
-            .OrderBy(Path.GetFileName, FileScan.NaturalOrder).LastOrDefault();
+            .OrderBy(d => Path.GetFileName(d), FileScan.NaturalOrder).LastOrDefault();
     }
 
     /// <summary>

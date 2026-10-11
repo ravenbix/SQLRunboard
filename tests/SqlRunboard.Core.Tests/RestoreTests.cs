@@ -175,6 +175,29 @@ public sealed class RestoreTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_script_queued_for_a_rerun_comes_back_Cancelled_and_Rerun_all_failed_continues_it()
+    {
+        var a = Saved("a", null, "1.sql", "2.sql");
+        executor.Scripts["2.sql"] = new FakeScript { Duration = TimeSpan.FromSeconds(100) };
+        list.Run(a.Id);
+        await Until(a.Id, r => r.Scripts[1].Status == ScriptStatus.Running);
+        list.Rerun(a.Id, "1.sql"); // Queued after 2.sql: the parallel limit is 1
+
+        var again = Restart();
+        using var sub2 = again.Subscribe();
+        var one = sub2.Snapshot[0].Run!.Scripts[0];
+        Assert.Equal((ScriptStatus.Cancelled, "The app stopped", 1), (one.Status, one.Error, one.Attempts.Count));
+
+        executor.Scripts.Clear();
+        again.RerunFailed(sub2.Snapshot[0].Id);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        RunState run;
+        do run = ((Batch)(await sub2.Changes.ReadAsync(cts.Token)).Data).Run!;
+        while (run.Active);
+        Assert.Equal([2, 2], run.Scripts.Select(s => s.Attempts.Count));
+    }
+
+    [Fact]
     public async Task A_target_change_while_the_app_was_stopped_ends_the_run()
     {
         var a = await InterruptedRun(new BatchTarget { Server = "sql01", Database = "Sales" });

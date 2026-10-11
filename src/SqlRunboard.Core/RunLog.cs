@@ -134,8 +134,12 @@ sealed class RunLog
                 a?.End is { } e ? (e - a.Start).TotalSeconds.ToString("F3", CultureInfo.InvariantCulture) : "",
                 a?.Rows?.ToString(CultureInfo.InvariantCulture) ?? "", Csv(error), Csv(target.Server), Csv(target.Database)]).Append("\r\n");
         foreach (var s in scripts)
-            if (s.Attempts.Count == 0) Row(s.Path, 0, s.Status, null, s.Error);
-            else for (var i = 0; i < s.Attempts.Count; i++) Row(s.Path, i + 1, s.Attempts[i].Status, s.Attempts[i], s.Attempts[i].Error);
+        {
+            for (var i = 0; i < s.Attempts.Count; i++) Row(s.Path, i + 1, s.Attempts[i].Status, s.Attempts[i], s.Attempts[i].Error);
+            // Work that did not start gets an attempt 0 row: a script that never started, or one that is Queued for a rerun
+            // (or was then cancelled). ReadSummary takes the status of the script from it.
+            if (s.Attempts.Count == 0 || s.Status != s.Attempts[^1].Status || s.Error is not null) Row(s.Path, 0, s.Status, null, s.Error);
+        }
 
         var file = Path.Combine(folder, SummaryFile);
         try

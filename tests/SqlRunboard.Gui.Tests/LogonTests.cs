@@ -101,6 +101,27 @@ public class LogonTests : AppPageTest
     }
 
     [Fact]
+    public async Task A_rerun_during_the_run_after_a_logon_failure_asks_for_the_password()
+    {
+        File.WriteAllText(Path.Combine(scripts, "b.sql"), "select 1");
+        App.Executor.Scripts["b.sql"] = new FakeScript { Duration = TimeSpan.FromSeconds(60) };
+        await OpenBatchAsync(SqlLogon);
+        App.Executor.Scripts["a.sql"] = new FakeScript { Duration = TimeSpan.FromSeconds(10), Status = ScriptStatus.Failed, Error = "Login failed for user 'deploy'.", LogonFailed = true };
+        var running = Panel.GetByRole(AriaRole.Region, new() { Name = "Running", Exact = true }).Locator(".card");
+        await RunButton.ClickAsync();
+        await SignInAsync("secret");
+        await Expect(running).ToHaveCountAsync(2);
+        App.Time.Advance(TimeSpan.FromSeconds(10)); // a.sql fails its logon; b.sql runs on
+
+        await Expect(running).ToHaveCountAsync(1);
+        await Header.GetByRole(AriaRole.Button, new() { Name = "Rerun all failed" }).ClickAsync();
+        await SignInAsync("again");
+
+        await Expect(running).ToHaveCountAsync(2);
+        Assert.Equal(["secret", "secret", "again"], App.Executor.Calls.Select(c => c.Connection.Password));
+    }
+
+    [Fact]
     public async Task Test_connection_shows_the_server_name_and_the_database()
     {
         await OpenBatchAsync(SqlLogon with { Auth = Auth.Integrated });

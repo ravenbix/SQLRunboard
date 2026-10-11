@@ -511,7 +511,7 @@ function renderTimeline(b) {
        <div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${lastA(x.r)?.start != null ? clock(run, lastA(x.r).start) : ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${elapsedOf(b, x.r) != null ? dur(elapsedOf(b, x.r)) : ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${Math.max(1, x.r.attempts.length)}</div>`
     : `<div class="c ${selCls(b, x)}" ${item(b, x)}>${bubble(x.r.status)}<span class="tnum">${esc(x.path)}</span></div>`;
   const lead = cols ? '<div class="h">#</div><div class="h">Status</div><div class="h">Script</div><div class="h">Start</div><div class="h">Elapsed</div><div class="h">Att.</div>' : '<div class="h"></div>';
-  if (!run) return `<p class="muted">No run yet</p><div class="tlg" style="grid-template-columns:${gridCols}">${lead}<div class="h"></div>${rows.map(x => names(x) + '<div class="chart"></div>').join('')}</div>`;
+  if (!run) return `<p class="muted">No run yet</p><div class="tlg" style="grid-template-columns:${gridCols}">${lead}<div class="h"></div>${rows.map(x => `${names(x)}<div class="chart ${selCls(b, x)}" data-path="${esc(x.path)}"></div>`).join('')}</div>`;
   const sc = tlScale(b), limit = +b.settings.parallelLimit || 1;
   const pts = [];
   for (let i = 0; i <= 300; i++) {

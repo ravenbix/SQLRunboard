@@ -37,4 +37,18 @@ public class EventsTests
         Assert.Equal("Untitled 2", change.GetProperty("name").GetString());
         Assert.NotEqual(first.GetProperty("id").GetInt32(), change.GetProperty("id").GetInt32());
     }
+
+    [Fact]
+    public async Task Stopping_the_server_ends_an_open_stream()
+    {
+        var app = await TestApp.StartAsync();
+        using var http = app.Client();
+        await using var stream = await http.GetStreamAsync("/events", Ct);
+        await using var events = SseParser.Create(stream).EnumerateAsync(Ct).GetAsyncEnumerator(Ct);
+        Assert.True(await events.MoveNextAsync()); // the snapshot
+
+        await app.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), Ct); // not the shutdown timeout of the host
+
+        Assert.False(await events.MoveNextAsync());
+    }
 }

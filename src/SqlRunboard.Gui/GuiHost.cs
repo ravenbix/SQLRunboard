@@ -75,7 +75,8 @@ public sealed class GuiHost : IAsyncDisposable
         app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
 
         // Server to page: SSE. Page to server: POST with a JSON body, one route per command.
-        app.MapGet("/events", (BatchList list, AppSettings settings, CancellationToken ct) => TypedResults.ServerSentEvents(Events(list, settings, ct)));
+        app.MapGet("/events", (BatchList list, AppSettings settings, IHostApplicationLifetime lifetime, CancellationToken ct) =>
+            TypedResults.ServerSentEvents(Events(list, settings, lifetime.ApplicationStopping, ct)));
         app.MapPost("/api/app-settings", (JsonNode? changes, AppSettings settings) =>
         {
             if (changes is not JsonObject o) return Results.BadRequest();
@@ -110,8 +111,13 @@ public sealed class GuiHost : IAsyncDisposable
         app.MapPost("/api/batches/{id:int}/save", (int id, SaveRequest r, BatchList list) => FileResult(() => list.Save(id, r.Path, r.Overwrite)));
         app.MapPost("/api/batches/{id:int}/reload", (int id, BatchList list) => FileResult(() => list.Reload(id)));
         app.MapPost("/api/batches/{id:int}/remove", (int id, BatchList list) => list.Remove(id) ? Results.Ok(new { }) : Results.NotFound());
-        // Quit: the page asked to save and confirmed. The stop itself runs in the ApplicationStopping handler below.
-        app.MapPost("/api/quit", (IHostApplicationLifetime lifetime) => { lifetime.StopApplication(); return Results.Ok(new { }); });
+        // Quit: the page asked to save and confirmed. The answer comes when the scripts stopped and the logs are written.
+        app.MapPost("/api/quit", async (BatchList list, IHostApplicationLifetime lifetime) =>
+        {
+            await StopRunsAsync(list);
+            lifetime.StopApplication(); // the ApplicationStopping handler below then has no runs to stop
+            return Results.Ok(new { });
+        });
         app.MapPost("/api/app-data/open", (GuiHostOptions o) =>
         {
             // UseShellExecute on a folder opens the file manager: Explorer, Finder or xdg-open.
@@ -132,10 +138,10 @@ public sealed class GuiHost : IAsyncDisposable
 
         var lockPath = Path.Combine(options.AppDataFolder, LockFileName);
         // Quit, Ctrl+C (ConsoleLifetime), SIGTERM and DisposeAsync all come here: cancel all scripts, write the logs, remove the lock file.
+        // The handler must be synchronous; Quit stops the runs before, so only Ctrl+C, SIGTERM and DisposeAsync wait here.
         app.Lifetime.ApplicationStopping.Register(() =>
         {
-            // ponytail: a script that does not stop in 10 s keeps no final log line; raise the limit if a real cancel takes longer.
-            app.Services.GetRequiredService<BatchList>().StopAsync().Wait(TimeSpan.FromSeconds(10));
+            StopRunsAsync(app.Services.GetRequiredService<BatchList>()).GetAwaiter().GetResult();
             File.Delete(lockPath);
         });
 
@@ -143,6 +149,14 @@ public sealed class GuiHost : IAsyncDisposable
         var host = new GuiHost(app, new Uri(app.Urls.First()), token, lockPath);
         host.WriteLock();
         return host;
+    }
+
+    /// <summary>Cancels all scripts and waits until their logs are written.</summary>
+    static async Task StopRunsAsync(BatchList list)
+    {
+        // ponytail: a script that does not stop in 10 s keeps no final log line; raise the limit if a real cancel takes longer.
+        try { await list.StopAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
+        catch (TimeoutException) { }
     }
 
     /// <summary>
@@ -202,12 +216,18 @@ public sealed class GuiHost : IAsyncDisposable
         JsonSerializer.Serialize(stream, new LockFile(BaseUrl, Token), JsonSerializerOptions.Web);
     }
 
-    static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, AppSettings settings, [EnumeratorCancellation] CancellationToken ct)
+    /// <summary>The stream ends when the page goes away, or when the app stops: the server then does not wait for the page.</summary>
+    static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, AppSettings settings, CancellationToken stopping, [EnumeratorCancellation] CancellationToken ct)
     {
         using var sub = list.Subscribe();
+        using var end = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping);
         yield return new SseItem<object>(new { batches = sub.Snapshot, app = settings.Snapshot(), messages = sub.Messages }, "snapshot");
-        await foreach (var change in sub.Changes.ReadAllAsync(ct))
-            yield return new SseItem<object>(change.Data, change.Kind);
+        while (true)
+        {
+            try { if (!await sub.Changes.WaitToReadAsync(end.Token)) yield break; }
+            catch (OperationCanceledException) { yield break; }
+            while (sub.Changes.TryRead(out var change)) yield return new SseItem<object>(change.Data, change.Kind);
+        }
     }
 
     public BatchList Batches => app.Services.GetRequiredService<BatchList>();

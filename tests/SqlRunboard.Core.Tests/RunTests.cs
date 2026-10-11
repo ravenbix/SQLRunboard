@@ -341,7 +341,7 @@ public sealed class RunTests : IAsyncDisposable
             "user" => s with { Target = t with { User = "other" } },
             "encrypt" => s with { Target = t with { Encrypt = Encrypt.Strict } },
             "extra" => s with { Target = t with { ExtraConnectionString = "App=x" } },
-            "folder" => s with { Folder = root + Path.DirectorySeparatorChar },
+            "folder" => s with { Folder = Path.Combine(root, "other") },
             "filters" => s with { Filters = "*.txt" },
             _ => s with { Recurse = true },
         })!.Run!;
@@ -353,6 +353,18 @@ public sealed class RunTests : IAsyncDisposable
         var next = list.Run(b.Id)!.Run!; // Run starts a new run, with attempt counts from 0
         Assert.False(next.Ended);
         Assert.All(next.Scripts, x => Assert.Single(x.Attempts));
+    }
+
+    [Fact]
+    public async Task The_same_folder_with_an_end_separator_does_not_end_the_run()
+    {
+        var b = NewBatch(4, "a.sql");
+        list.Run(b.Id);
+        await Until(b.Id, r => !r.Active);
+
+        var run = list.UpdateSettings(b.Id, b.Settings with { Folder = root + Path.DirectorySeparatorChar })!.Run!;
+
+        Assert.False(run.Ended);
     }
 
     [Fact]

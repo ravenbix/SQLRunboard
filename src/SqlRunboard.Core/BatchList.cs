@@ -108,9 +108,13 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         var (a, run) = (b.Settings, b.Run);
         var newTarget = a.Target with { PasswordVariable = null } != settings.Target with { PasswordVariable = null };
         if (newTarget) passwords.Remove(b.Id); // a new target asks for the password again
-        var ends = newTarget || (a.Folder, a.Filters, a.Recurse) != (settings.Folder, settings.Filters, settings.Recurse);
+        var ends = newTarget || Folder(b.File, a.Folder) != Folder(b.File, settings.Folder) || (a.Filters, a.Recurse) != (settings.Filters, settings.Recurse);
         return ends && run is { Ended: false, Active: false } && runs.Remove(b.Id) ? run with { Ended = true } : run;
     }
+
+    /// <summary>The full folder path, to compare: "scripts", "scripts/" and "./scripts" are the same folder.</summary>
+    static string? Folder(string? batchFile, string? folder) =>
+        FolderPath(batchFile, folder) is { } f && !string.IsNullOrWhiteSpace(f) ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(f)) : null;
 
     /// <summary>Sets or clears the check box of one file. Null if no batch has this id.</summary>
     public Batch? SetInclude(int id, string path, bool include)

@@ -227,6 +227,21 @@ public sealed class RunLogTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_batch_removed_during_a_run_still_ends_its_log()
+    {
+        var b = NewBatch(new BatchSettings { ParallelLimit = 1 }, "1.sql", "2.sql");
+        Script("1.sql", 60);
+        list.Run(b.Id);
+
+        Assert.True(list.Remove(b.Id));
+        await list.StopAsync().WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); // waits for the late end of 1.sql
+
+        var folder = Path.Combine(appData, "logs", "Untitled 1_20261009-140000");
+        Assert.Contains("1.sql,1,Cancelled", File.ReadAllText(Path.Combine(folder, "summary.csv")));
+        Assert.Contains("Run ended: 2 scripts, 0 succeeded, 0 failed, 2 cancelled.", File.ReadAllText(Path.Combine(folder, "run.log")));
+    }
+
+    [Fact]
     public async Task Stop_cancels_all_scripts_of_all_batches_and_ends_when_the_logs_are_written()
     {
         var a = NewBatch(new BatchSettings { ParallelLimit = 1 }, "1.sql", "2.sql");

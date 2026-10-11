@@ -172,7 +172,7 @@ public class TimelineTests : AppPageTest
         await Toggle("Columns").CheckAsync();
         await Expect(Panel.Locator(".tlg > .h")).ToHaveTextAsync(["#", "Status", "Script", "Start", "Elapsed", "Att."]);
         await Expect(Panel.Locator(".tlg > .c[data-path='a.sql']")).ToHaveTextAsync(["", "✓ Succeeded", "a.sql", "14:00:00", "0:00", "1"]);
-        await Expect(Panel.Locator(".tlg > .c[data-path='c.sql']")).ToHaveTextAsync(["1", "○ Queued", "c.sql", "", "", "1"]);
+        await Expect(Panel.Locator(".tlg > .c[data-path='c.sql']")).ToHaveTextAsync(["1", "○ Queued", "c.sql", "", "", "0"]); // not started: 0 attempts
         await Expect(Bars("b.sql")).ToHaveCountAsync(1); // the Gantt column
 
         // the strip and the axis are in the header of the chart column

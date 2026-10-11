@@ -443,7 +443,7 @@ function tableOrder(b) {
 const viewList = b => app.view === 'board' ? boardCols(b).flatMap(c => c[1]) : app.view === 'table' ? tableOrder(b) : runOrder(b);
 function ariaRow(b, x) {
   const e = elapsedOf(b, x.r), rows = rowsOf(x.r);
-  return `${x.path}, ${x.r.virtual ? 'Not run yet' : x.r.status}, attempt ${Math.max(1, x.r.attempts.length)}${e != null ? `, elapsed ${words(e)}` : ''}, ${rows == null ? 'rows unknown' : rows + ' rows'}`;
+  return `${x.path}, ${x.r.virtual ? 'Not run yet' : x.r.status}, attempt ${x.r.attempts.length}${e != null ? `, elapsed ${words(e)}` : ''}, ${rows == null ? 'rows unknown' : rows + ' rows'}`;
 }
 const cur = () => app.batches.find(b => b.id === app.cur);
 const item = (b, x) => `data-path="${esc(x.path)}" data-k="s:${esc(x.path)}" tabindex="${b.sel === x.path ? 0 : -1}" aria-label="${esc(ariaRow(b, x))}"`;
@@ -493,7 +493,7 @@ function cardMeta(b, x) {
   const e = elapsedOf(b, x.r), rows = rowsOf(x.r), parts = [];
   if (x.r.status === 'Queued') parts.push(`#${x.q}`);
   if (e != null) parts.push(dur(e));
-  parts.push(`attempt ${Math.max(1, x.r.attempts.length)}`, `${rows == null ? '—' : rows.toLocaleString()} rows`);
+  parts.push(`attempt ${x.r.attempts.length}`, `${rows == null ? '—' : rows.toLocaleString()} rows`);
   if (x.r.status === 'Cancelled') parts.push('<b>Cancelled</b>');
   if (x.r.status === 'Running' && lastA(x.r).rollback != null) parts.push('<b>Rolling back</b>');
   return parts.map(p => `<span>${p}</span>`).join('');
@@ -507,7 +507,7 @@ function renderTable(b) {
   return `<table><thead><tr>${th('q', '#', 'num')}${th('status', 'Status')}${th('script', 'Script')}${th('start', 'Start')}${th('elapsed', 'Elapsed', 'num')}${th('attempts', 'Attempts', 'num')}${th('rows', 'Rows', 'num')}</tr></thead><tbody>
     ${tableOrder(b).map(x => { const a = lastA(x.r), e = elapsedOf(b, x.r), rows = rowsOf(x.r); return `<tr class="${selCls(b, x)}" ${item(b, x)}>
       <td class="num">${x.q ?? ''}</td><td>${bubble(x.r.status)} ${x.r.virtual ? 'Not run yet' : x.r.status}</td><td class="tnum">${esc(x.path)}</td>
-      <td>${a?.start != null ? clock(b.run, a.start) : ''}</td><td class="num">${e != null ? dur(e) : ''}</td><td class="num">${Math.max(1, x.r.attempts.length)}</td>
+      <td>${a?.start != null ? clock(b.run, a.start) : ''}</td><td class="num">${e != null ? dur(e) : ''}</td><td class="num">${x.r.attempts.length}</td>
       <td class="num">${rows == null ? '—' : rows.toLocaleString()}</td></tr>`; }).join('')}</tbody></table>`;
 }
 // timeline layout: time -> 0..1, with idle gaps over 1 minute cut when Collapse is on
@@ -528,7 +528,7 @@ function renderTimeline(b) {
   const gridCols = cols ? '36px 110px minmax(150px, 220px) 70px 64px 56px minmax(300px, 1fr)' : 'minmax(140px, 220px) minmax(300px, 1fr)';
   const names = x => cols
     ? `<div class="c ${selCls(b, x)}" ${item(b, x)}>${x.q ?? ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${bubble(x.r.status)} ${x.r.virtual ? 'Not run yet' : x.r.status}</div><div class="c tnum ${selCls(b, x)}" data-path="${esc(x.path)}">${esc(x.path)}</div>
-       <div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${lastA(x.r)?.start != null ? clock(run, lastA(x.r).start) : ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${elapsedOf(b, x.r) != null ? dur(elapsedOf(b, x.r)) : ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${Math.max(1, x.r.attempts.length)}</div>`
+       <div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${lastA(x.r)?.start != null ? clock(run, lastA(x.r).start) : ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${elapsedOf(b, x.r) != null ? dur(elapsedOf(b, x.r)) : ''}</div><div class="c ${selCls(b, x)}" data-path="${esc(x.path)}">${x.r.attempts.length}</div>`
     : `<div class="c ${selCls(b, x)}" ${item(b, x)}>${bubble(x.r.status)}<span class="tnum">${esc(x.path)}</span></div>`;
   const lead = cols ? '<div class="h">#</div><div class="h">Status</div><div class="h">Script</div><div class="h">Start</div><div class="h">Elapsed</div><div class="h">Att.</div>' : '<div class="h"></div>';
   if (!run) return `<p class="muted">No run yet</p><div class="tlg" style="grid-template-columns:${gridCols}">${lead}<div class="h"></div>${rows.map(x => `${names(x)}<div class="chart ${selCls(b, x)}" data-path="${esc(x.path)}"></div>`).join('')}</div>`;

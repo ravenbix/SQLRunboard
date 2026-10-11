@@ -35,6 +35,7 @@ public class RunViewTests : AppPageTest
         await Expect(Panel.Locator("table thead th")).ToHaveTextAsync(["#", "Status", "Script", "Start", "Elapsed", "Attempts", "Rows"]);
         await Expect(Rows.Locator("td:nth-child(3)")).ToHaveTextAsync(["a.sql", "b.sql", "c.sql"]);
         await Expect(Rows.Locator("td:nth-child(1)")).ToHaveTextAsync(["", "1", "2"]); // the queue position only for Queued scripts
+        await Expect(Rows.Locator("td:nth-child(6)")).ToHaveTextAsync(["1", "0", "0"]); // a script that did not start has 0 attempts
 
         App.Time.Advance(TimeSpan.FromSeconds(10));
         await Expect(Rows.Nth(0)).ToContainTextAsync("Succeeded");

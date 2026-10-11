@@ -5,6 +5,15 @@ public class ExecutableTests
 {
     static readonly CancellationToken Ct = TestContext.Current.CancellationToken;
 
+    /// <summary>bin/sqlrunboard.dll with these arguments, through the dotnet host of the test run. Standard output is redirected.</summary>
+    static ProcessStartInfo Exe(params string[] args)
+    {
+        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet") { RedirectStandardOutput = true };
+        psi.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "sqlrunboard.dll"));
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        return psi;
+    }
+
     [Fact]
     public void The_browser_executable_has_no_native_UI_dependency()
     {
@@ -18,12 +27,7 @@ public class ExecutableTests
     public async Task Starts_the_server_in_the_given_app_data_folder_without_a_browser_and_prints_the_start_url()
     {
         var appData = Path.Combine(Path.GetTempPath(), "sqlrunboard-exe-" + Guid.NewGuid().ToString("N"));
-        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
-        {
-            ArgumentList = { Path.Combine(AppContext.BaseDirectory, "sqlrunboard.dll"), "--app-data", appData, "--no-browser" },
-            RedirectStandardOutput = true,
-        };
-        using var exe = Process.Start(psi)!;
+        using var exe = Process.Start(Exe("--app-data", appData, "--no-browser"))!;
         try
         {
             var line = await exe.StandardOutput.ReadLineAsync(Ct).AsTask().WaitAsync(TimeSpan.FromSeconds(30), Ct) ?? "";
@@ -49,12 +53,7 @@ public class ExecutableTests
     {
         Assert.SkipWhen(OperatingSystem.IsWindows(), "No SIGINT for a child process on Windows. Quit and Ctrl+C share the ApplicationStopping handler (QuitTests).");
         var appData = Directory.CreateTempSubdirectory("sqlrunboard-exe-").FullName;
-        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
-        {
-            ArgumentList = { Path.Combine(AppContext.BaseDirectory, "sqlrunboard.dll"), "--app-data", appData, "--no-browser" },
-            RedirectStandardOutput = true,
-        };
-        using var exe = Process.Start(psi)!;
+        using var exe = Process.Start(Exe("--app-data", appData, "--no-browser"))!;
         try
         {
             await exe.StandardOutput.ReadLineAsync(Ct).AsTask().WaitAsync(TimeSpan.FromSeconds(30), Ct);
@@ -77,12 +76,7 @@ public class ExecutableTests
     public async Task A_second_start_opens_the_running_server_and_stops()
     {
         await using var app = await TestApp.StartAsync();
-        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
-        {
-            ArgumentList = { Path.Combine(AppContext.BaseDirectory, "sqlrunboard.dll"), "--app-data", app.AppData, "--no-browser" },
-            RedirectStandardOutput = true,
-        };
-        using var exe = Process.Start(psi)!;
+        using var exe = Process.Start(Exe("--app-data", app.AppData, "--no-browser"))!;
         try
         {
             var output = await exe.StandardOutput.ReadToEndAsync(Ct).WaitAsync(TimeSpan.FromSeconds(30), Ct);
@@ -100,11 +94,8 @@ public class ExecutableTests
     [Fact]
     public async Task An_unknown_argument_prints_the_usage_and_exits_with_code_2()
     {
-        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
-        {
-            ArgumentList = { Path.Combine(AppContext.BaseDirectory, "sqlrunboard.dll"), "--bogus" },
-            RedirectStandardError = true,
-        };
+        var psi = Exe("--bogus");
+        psi.RedirectStandardError = true;
         using var exe = Process.Start(psi)!;
         try
         {

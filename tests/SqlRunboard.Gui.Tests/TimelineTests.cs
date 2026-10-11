@@ -93,6 +93,40 @@ public class TimelineTests : AppPageTest
         await Expect(Bars("c.sql")).Not.ToHaveClassAsync(new System.Text.RegularExpressions.Regex(@"\bhatch\b"));
     }
 
+    [Fact]
+    public async Task The_chart_fits_the_run_to_the_width_and_a_rerun_makes_the_axis_longer()
+    {
+        App.Executor.Scripts["b.sql"] = new FakeScript { Duration = TimeSpan.FromSeconds(100) };
+        App.Executor.Scripts["c.sql"] = new FakeScript { Duration = TimeSpan.FromSeconds(40) };
+        var b = NewBatch(2, "a.sql", "b.sql", "c.sql"); // a.sql ends at once
+        App.Host.Batches.Run(b.Id);
+        await OpenTimeline(b.Name);
+        var lastTick = Panel.Locator(".axis span").Last;
+
+        await Expect(Bars("c.sql")).ToHaveCountAsync(1);
+        App.Time.Advance(TimeSpan.FromSeconds(40)); // c ends
+        await Expect(Bars("c.sql").Locator(".i")).ToHaveTextAsync("✓");
+        await Expect(Bars("b.sql").Locator(".d")).ToHaveTextAsync(new System.Text.RegularExpressions.Regex("^0:4")); // the Running bar grows live
+        App.Time.Advance(TimeSpan.FromSeconds(60)); // b ends: the run is complete
+        await Expect(Bars("b.sql").Locator(".i")).ToHaveTextAsync("✓");
+
+        await Expect(Panel.Locator(".axis span").First).ToHaveTextAsync("0:00");
+        await Expect(lastTick).ToHaveTextAsync("1:40");
+        var chart = (await Row("b.sql").BoundingBoxAsync())!;
+        var bar = (await Bars("b.sql").BoundingBoxAsync())!;
+        Assert.InRange(bar.X + bar.Width, chart.X + chart.Width - 1, chart.X + chart.Width + 1); // the full run fits the width
+        Assert.InRange((await Bars("a.sql").BoundingBoxAsync())!.Width, 2, 2.5); // 0 s: the minimum width
+        await Expect(Bars("b.sql")).ToHaveAttributeAsync("title", new System.Text.RegularExpressions.Regex("Start 14:00:00\nEnd 14:01:40\nDuration 1:40$"));
+
+        await Row("c.sql").ClickAsync(new() { Button = MouseButton.Right });
+        await Menu("c.sql").GetByRole(AriaRole.Menuitem, new() { Name = "Rerun" }).ClickAsync();
+        await Expect(Bars("c.sql")).ToHaveCountAsync(2); // the rerun stays on the row of its script
+        await Expect(Bars("c.sql").Last.Locator(".i")).ToHaveTextAsync("▶");
+        App.Time.Advance(TimeSpan.FromSeconds(40));
+        await Expect(Bars("c.sql").Last.Locator(".i")).ToHaveTextAsync("✓");
+        await Expect(lastTick).ToHaveTextAsync("2:20");
+    }
+
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();

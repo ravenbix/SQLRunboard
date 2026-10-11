@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace SqlRunboard.Core;
 
@@ -29,6 +30,73 @@ sealed class RunLog
         for (var n = 2; Directory.Exists(folder); n++) folder = $"{name}-{n}";
         Directory.CreateDirectory(folder);
         return new RunLog(folder, time, warn);
+    }
+
+    /// <summary>The log folder of an earlier run (after a restart): reruns add to it. Its run is not active.</summary>
+    public static RunLog Open(string folder, TimeProvider time, Action<string> warn) => new(folder, time, warn) { active = false };
+
+    /// <summary>The newest log folder of the batch under parent/logs that has a summary.csv, or null.</summary>
+    public static string? Newest(string parent, string batchName)
+    {
+        var logs = Path.Combine(parent, "logs");
+        if (!Directory.Exists(logs)) return null;
+        var name = new Regex($@"^{Regex.Escape(batchName)}_\d{{8}}-\d{{6}}(-\d+)?$");
+        // ponytail: the newest by folder name (local start time); a run in the repeated hour at a DST change can sort wrong.
+        return Directory.EnumerateDirectories(logs).Where(d => name.IsMatch(Path.GetFileName(d)) && File.Exists(Path.Combine(d, SummaryFile)))
+            .OrderBy(d => Path.GetFileName(d), FileScan.NaturalOrder).LastOrDefault();
+    }
+
+    /// <summary>
+    /// Reads summary.csv back: the scripts in the start order, and the server and database of the run.
+    /// A Queued or Running row changes to Cancelled with "The app stopped". Throws IOException or FormatException.
+    /// </summary>
+    public static (List<ScriptRun> Scripts, string Server, string Database) ReadSummary(string folder)
+    {
+        var rows = ParseCsv(File.ReadAllText(Path.Combine(folder, SummaryFile))).Skip(1).Where(r => r.Count >= 10).ToList();
+        static DateTimeOffset? Time(string v) => v == "" ? null : DateTimeOffset.Parse(v, CultureInfo.InvariantCulture);
+        // A Running attempt ends at the last time that the file knows: its last status change.
+        var last = rows.SelectMany(r => new[] { Time(r[3]), Time(r[4]) }).Max();
+        var scripts = new OrderedDictionary<string, ScriptRun>(StringComparer.Ordinal);
+        foreach (var r in rows)
+        {
+            var status = Enum.Parse<ScriptStatus>(r[2]);
+            var stopped = status is ScriptStatus.Queued or ScriptStatus.Running;
+            var error = stopped ? "The app stopped" : r[7] == "" ? null : r[7];
+            if (stopped) status = ScriptStatus.Cancelled;
+            var s = scripts.GetValueOrDefault(r[0]) ?? new ScriptRun(r[0], status, []);
+            scripts[r[0]] = r[1] == "0" ? s with { Status = status, Error = error }
+                : s with { Status = status, Attempts = [.. s.Attempts, new Attempt(Time(r[3])!.Value, Time(r[4]) ?? last, status, r[6] == "" ? null : long.Parse(r[6], CultureInfo.InvariantCulture), error)] };
+        }
+        return ([.. scripts.Values], rows.FirstOrDefault()?[8] ?? "", rows.FirstOrDefault()?[9] ?? "");
+    }
+
+    /// <summary>RFC 4180: quoted fields can have commas, "" and line breaks.</summary>
+    static IEnumerable<List<string>> ParseCsv(string text)
+    {
+        List<string> row = [];
+        var field = new StringBuilder();
+        bool quoted = false, any = false;
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            any = true;
+            if (quoted)
+            {
+                if (c != '"') field.Append(c);
+                else if (i + 1 < text.Length && text[i + 1] == '"') { field.Append('"'); i++; }
+                else quoted = false;
+            }
+            else if (c == '"') quoted = true;
+            else if (c == ',') { row.Add(field.ToString()); field.Clear(); }
+            else if (c == '\n')
+            {
+                row.Add(field.ToString().TrimEnd('\r')); field.Clear();
+                yield return row;
+                (row, any) = ([], false);
+            }
+            else field.Append(c);
+        }
+        if (any) { row.Add(field.ToString()); yield return row; }
     }
 
     /// <summary>Adds one line to run.log, with the local time.</summary>

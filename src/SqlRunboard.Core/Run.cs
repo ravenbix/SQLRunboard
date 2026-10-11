@@ -15,3 +15,12 @@ public sealed record RunState(DateTimeOffset Start, DateTimeOffset Now, IReadOnl
 {
     public bool Active => Scripts.Any(s => s.Status is ScriptStatus.Queued or ScriptStatus.Running);
 }
+
+/// <summary>One message of an attempt, for the drawer. Time is the server clock.</summary>
+public sealed record RunMessage(DateTimeOffset Time, SqlMessageKind Kind, string Text);
+
+/// <summary>SSE "message": a new message of attempt number Attempt (1-based) of the script Path in the batch Id.</summary>
+public sealed record ScriptMessage(int Id, string Path, int Attempt, DateTimeOffset Time, SqlMessageKind Kind, string Text);
+
+/// <summary>The kept messages of one attempt: the last <see cref="BatchList.MaxMessages"/>. Earlier = the older ones, only in run.log.</summary>
+public sealed record AttemptMessages(int Id, string Path, int Attempt, int Earlier, IReadOnlyList<RunMessage> Messages);

@@ -210,13 +210,13 @@ const app = { ...PREFS, batches: [], cur: null, dialog: null, menu: null };
 // ---------- server state ----------
 // The server keeps all batch state. Each server batch merges into a page object that also keeps the view state (tab, selection, drawer).
 // The page uses the flat settings of the prototype; the server uses the batch file shape (target is nested).
-const toView = sb => ({ ...sb, run: toRun(sb.run), settings: { ...sb.settings, ...sb.settings.target, extra: sb.settings.target.extraConnectionString, timeoutSeconds: sb.settings.timeoutSeconds ?? '' } });
+const toView = sb => ({ ...sb, missing: !!sb.fileError, run: toRun(sb.run), settings: { ...sb.settings, ...sb.settings.target, extra: sb.settings.target.extraConnectionString, timeoutSeconds: sb.settings.timeoutSeconds ?? '' } });
 // The server run (ISO times) in the prototype shape: times are seconds from the start of the run.
 // run.t is "now" on the server clock: the page clock plus the offset that the last state gave (the tests use a fake server clock).
 function toRun(r) {
   if (!r) return null;
   const t0 = Date.parse(r.start), sec = x => x == null ? null : (Date.parse(x) - t0) / 1000, skew = Date.parse(r.now) - Date.now(), rs = {};
-  for (const s of r.scripts) rs[s.path] = { status: s.status, error: s.error, msgs: [], attempts: s.attempts.map((a, i) => ({ n: i + 1, start: sec(a.start), end: sec(a.end), status: a.status, rows: a.rows, error: a.error })) };
+  for (const s of r.scripts) rs[s.path] = { status: s.status, error: s.error, attempts: s.attempts.map((a, i) => ({ n: i + 1, start: sec(a.start), end: sec(a.end), status: a.status, rows: a.rows, error: a.error })) };
   const ended = !r.scripts.some(s => s.status === 'Queued' || s.status === 'Running');
   return { rs, queue: r.queue, wall: new Date(t0), live: true, ended, stale: r.ended, endAt: ended ? Math.max(0, ...Object.values(rs).flatMap(x => x.attempts.map(a => a.end ?? 0))) : null, get t() { return (Date.now() + skew - t0) / 1000; } };
 }
@@ -226,6 +226,7 @@ const fromView = s => ({ folder: s.folder || null, filters: s.filters, recurse: 
 function upsert(sb) {
   let b = app.batches.find(x => x.id === sb.id);
   if (!b) app.batches.push(b = { missing: false, tab: null, sel: null, drawer: false, run: null, scripts: [], signing: null, logonMsg: null, testMsg: null, sort: null, fileSel: null });
+  if (!b.msgs || sb.run?.start !== b.runStart) { b.msgs = {}; b.warnings = []; b.runStart = sb.run?.start; } // a new run: its messages come after this event
   const mine = b.saving ? b.settings : null; // while my settings are on the way, an older echo must not undo them
   Object.assign(b, toView(sb));
   if (mine) b.settings = mine;
@@ -238,6 +239,16 @@ async function post(url, body = {}) {
   }
   return res.json();
 }
+// The drawer messages: b.msgs[path][attempt] = { earlier, list }. The page keeps the last MAX_MSGS of each attempt, as the server does.
+const MAX_MSGS = 10000;
+function addMsg(b, path, a, m) {
+  const at = ((b.msgs[path] ??= {})[a] ??= { earlier: 0, list: [] });
+  at.list.push(m);
+  if (at.list.length > MAX_MSGS) { at.list.shift(); at.earlier++; }
+}
+// Many messages can come at once: render once for them.
+let renderTimer = null;
+const renderSoon = () => { renderTimer ??= setTimeout(() => { renderTimer = null; render(); }, 50); };
 // The side list in the server order. A batch that is not in ids drops out.
 const reorder = ids => { app.batches = ids.map(id => app.batches.find(b => b.id === id)).filter(Boolean); };
 // SSE: the full state first ("snapshot"), then one event per change. EventSource sends the auth cookie and reconnects by itself.
@@ -249,13 +260,17 @@ function connect() {
     for (const k in PREFS) if (k in snap.app) app[k] = snap.app[k];
     applyTheme(); setDrawerWidth(app.drawerWidth);
     reorder(snap.batches.map(sb => upsert(sb).id));
+    for (const b of app.batches) b.msgs = {};
+    for (const m of snap.messages) { const b = app.batches.find(x => x.id === m.id); if (b) b.msgs[m.path] = { ...b.msgs[m.path], [m.attempt]: { earlier: m.earlier, list: m.messages } }; }
     if (!app.batches.some(b => b.id === app.cur)) app.cur = app.batches[0]?.id ?? null;
     document.documentElement.dataset.connected = ''; // tests wait for this
     render();
   });
   es.addEventListener('batch', e => { upsert(JSON.parse(e.data)); render(); });
   es.addEventListener('remove', e => dropBatch(JSON.parse(e.data).id));
-  es.addEventListener('warning', e => { const w = JSON.parse(e.data); toast(`${app.batches.find(b => b.id === w.id)?.name ?? 'Batch'}: ${w.text}`); });
+  es.addEventListener('message', e => { const m = JSON.parse(e.data), b = app.batches.find(x => x.id === m.id); if (b) { addMsg(b, m.path, m.attempt, m); renderSoon(); } });
+  // ponytail: the warnings live in the page only (lost at a reload); run.log keeps them.
+  es.addEventListener('warning', e => { const w = JSON.parse(e.data), b = app.batches.find(x => x.id === w.id); b?.warnings.push(w.text); toast(`${b?.name ?? 'Batch'}: ${w.text}`); render(); });
   es.addEventListener('order', e => { reorder(JSON.parse(e.data).ids); render(); });
   es.onerror = () => { delete document.documentElement.dataset.connected; };
 }
@@ -292,22 +307,26 @@ async function logon(b, then, password = null) {
   else if (r) then(r);
   render();
 }
+// The then of logon: "Confirm before run" shows the target, the login and n scripts before go. Cancel starts nothing.
+const confirmed = (b, n, go) => r => b.settings.confirmBeforeRun ? openDialog({ kind: 'confirm', b, login: r.login, n, then: go }) : go();
 function runBatch(b) {
   if (!b || b.missing || locked(b)) return;
-  logon(b, async () => {
+  logon(b, confirmed(b, b.scripts.filter(s => s.include && s.state !== 'Missing').length, async () => {
     const sb = await sendEdit(`/api/batches/${b.id}/run`, {});
     if (sb) { upsert(sb); b.tab = 'run'; render(); }
-  });
+  }));
 }
 const cancel = (b, path) => sendEdit(`/api/batches/${b.id}/cancel`, { path });
 const cancelAll = b => sendEdit(`/api/batches/${b.id}/cancel-all`, {});
 // The server decides: during a run it moves a Queued script in the queue, otherwise it changes the start order. dir: up, down, top, bottom.
 const move = (b, path, dir) => path && sendEdit(`/api/batches/${b.id}/move`, { path, to: dir });
 const moveBatch = (b, dir) => sendEdit(`/api/batches/${b.id}/move-in-list`, { to: dir });
-// A rerun after the run ended checks the logon first, as Run does. A rerun during the run uses the kept password.
-const afterLogon = (b, go) => b.run?.ended ? logon(b, go) : go();
-const rerun = (b, path) => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun`, { path }));
-const rerunFailed = b => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun-failed`, {}));
+// A rerun after the run ended checks the logon first, as Run does. A rerun during the run uses the kept password,
+// but "Confirm before run" also checks the logon then: the dialog shows the login.
+const afterLogon = (b, n, go) => b.run?.ended || b.settings.confirmBeforeRun ? logon(b, confirmed(b, n, go)) : go();
+const rerun = (b, path) => afterLogon(b, 1, () => sendEdit(`/api/batches/${b.id}/rerun`, { path }));
+const rerunFailed = b => afterLogon(b, Object.values(b.run.rs).filter(r => r.status === 'Failed' || r.status === 'Cancelled').length,
+  () => sendEdit(`/api/batches/${b.id}/rerun-failed`, {}));
 function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
 // The folder, Open and Save as dialogs: the server lists the folders (and the batch files). kind: folder, open or saveAs.
 async function browse(b, path, kind = 'folder', resolve) {
@@ -388,7 +407,7 @@ function batchStatus(b) {
   const c = counts(b); return c.Failed + c.Cancelled ? 'Failed' : 'Succeeded';
 }
 function progressText(b) {
-  if (b.missing) return 'File not found';
+  if (b.missing) return b.fileError;
   if (b.signing) return 'Signing in...';
   if (!b.run) return 'Not run yet';
   const c = counts(b), n = Object.keys(b.run.rs).length, bad = c.Failed + c.Cancelled;
@@ -396,7 +415,7 @@ function progressText(b) {
 }
 // one row per script: the run rows, or the Queued rows before the first run
 function rowsFor(b) {
-  if (!b.run) return b.scripts.filter(s => s.include && s.state !== 'Missing').map((s, i) => ({ path: s.path, r: { status: 'Queued', attempts: [], msgs: [], virtual: true }, q: i + 1 }));
+  if (!b.run) return b.scripts.filter(s => s.include && s.state !== 'Missing').map((s, i) => ({ path: s.path, r: { status: 'Queued', attempts: [], virtual: true }, q: i + 1 }));
   return Object.entries(b.run.rs).map(([path, r]) => ({ path, r, q: r.status === 'Queued' ? b.run.queue.indexOf(path) + 1 : null }));
 }
 function runOrder(b) { // start of the first attempt; Queued at the bottom in queue order
@@ -440,7 +459,7 @@ function renderSide() {
 }
 function renderHeader(b) {
   if (!b) return '<p class="muted">No batch. Select New batch or Open.</p>';
-  if (b.missing) return `<h1>${esc(b.name)}</h1><div class="banner err">File not found: <span class="tnum">${esc(b.file)}</span>. The batch stays in the list, because the drive can come back. <button data-cmd="remove">Remove from list</button></div>`;
+  if (b.missing) return `<h1>${esc(b.name)}</h1><div class="banner err">${esc(b.fileError)}: <span class="tnum">${esc(b.file)}</span>. The batch stays in the list, because the drive can come back. <button data-cmd="remove">Remove from list</button></div>`;
   const s = b.settings, c = counts(b), run = b.run, n = run ? Object.keys(run.rs).length : 0, live = run && !run.ended, bad = c.Failed + c.Cancelled;
   const seg = (k, v) => n ? `<i style="width:${100 * v / n}%;background:var(${CVAR[k]})"></i>` : '';
   return `<h1>${esc(b.name)}${b.dirty ? ' •' : ''}</h1>
@@ -583,13 +602,17 @@ function renderDrawer(b) {
   const x = rowsFor(b).find(y => y.path === b.sel);
   if (!x) return '';
   const r = x.r, a = lastA(r), live = b.run && !b.run.ended, mv = canMove(b, x.path);
-  let body = '';
+  let body = b.warnings.map(w => `<div class="Error">${esc(w)}</div>`).join(''); // log write warnings of the run
   if (r.virtual) body = '<p class="muted">No run yet.</p>';
   else if (!r.attempts.length && r.error) body = `<div class="Error">${esc(r.error)}</div>`; // did not start
   for (const at of r.attempts) {
     body += `<div class="sep" id="att-${at.n}">Attempt ${at.n}${at.start != null ? ` · ${clock(b.run, at.start)}` : ''} · ${at.status}</div>`;
     if (at.restored) body += `${at.error ? `<div class="Error">${lineLink(at.error)}</div>` : ''}<div class="muted">Full messages: <a href="#" data-cmd="runlog">run.log</a></div>`;
-    else body += r.msgs.filter(m => m.a === at.n).map(m => `<div class="${m.kind}"><span class="muted tnum">${clock(b.run, m.t)}</span> ${m.kind === 'Error' ? lineLink(m.text) : esc(m.text)}</div>`).join('');
+    else {
+      const ms = b.msgs[x.path]?.[at.n];
+      if (ms?.earlier) body += `<div class="muted">${ms.earlier.toLocaleString()} earlier messages are in run.log</div>`;
+      body += (ms?.list ?? []).map(m => `<div class="${m.kind}"><span class="muted tnum">${new Date(m.time).toLocaleTimeString([], { hour12: false })}</span> ${m.kind === 'Error' ? lineLink(m.text) : esc(m.text)}</div>`).join('');
+    }
   }
   return `<div class="dh"><div class="t">${bubble(r.status)}<span>${esc(x.path)}</span></div>
     <button data-cmd="dCancel" ${live && (r.status === 'Queued' || (r.status === 'Running' && a.rollback == null)) ? '' : 'disabled'}>Cancel</button>

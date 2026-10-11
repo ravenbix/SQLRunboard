@@ -67,6 +67,7 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
         var app = builder.Build();
+        RestoreBatches(app.Services.GetRequiredService<BatchList>(), app.Services.GetRequiredService<AppSettings>());
         app.Use(RejectForeignRequests);
         app.Use(RequireToken(token));
         var files = new EmbeddedFileProvider(typeof(GuiHost).Assembly, "SqlRunboard.Gui.wwwroot");
@@ -144,6 +145,15 @@ public sealed class GuiHost : IAsyncDisposable
         return host;
     }
 
+    /// <summary>The side list comes back from the app settings, and each change of its batch files goes there.</summary>
+    static void RestoreBatches(BatchList list, AppSettings settings)
+    {
+        const string Name = "batchFiles";
+        var files = settings.Snapshot()[Name] as JsonArray ?? [];
+        list.Restore(files.Where(f => f?.GetValueKind() == JsonValueKind.String).Select(f => f!.GetValue<string>()));
+        list.FilesChanged = f => settings.Merge(new JsonObject { [Name] = new JsonArray([.. f.Select(x => (JsonNode)x)]) });
+    }
+
     /// <summary>A batch file command: the batch, or a problem whose detail the page shows. 409: the file changed on disk.</summary>
     static IResult FileResult(Func<Batch?> command)
     {
@@ -188,7 +198,7 @@ public sealed class GuiHost : IAsyncDisposable
     static async IAsyncEnumerable<SseItem<object>> Events(BatchList list, AppSettings settings, [EnumeratorCancellation] CancellationToken ct)
     {
         using var sub = list.Subscribe();
-        yield return new SseItem<object>(new { batches = sub.Snapshot, app = settings.Snapshot() }, "snapshot");
+        yield return new SseItem<object>(new { batches = sub.Snapshot, app = settings.Snapshot(), messages = sub.Messages }, "snapshot");
         await foreach (var change in sub.Changes.ReadAllAsync(ct))
             yield return new SseItem<object>(change.Data, change.Kind);
     }

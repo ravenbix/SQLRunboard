@@ -290,22 +290,26 @@ async function logon(b, then, password = null) {
   else if (r) then(r);
   render();
 }
+// The then of logon: "Confirm before run" shows the target, the login and n scripts before go. Cancel starts nothing.
+const confirmed = (b, n, go) => r => b.settings.confirmBeforeRun ? openDialog({ kind: 'confirm', b, login: r.login, n, then: go }) : go();
 function runBatch(b) {
   if (!b || b.missing || locked(b)) return;
-  logon(b, async () => {
+  logon(b, confirmed(b, b.scripts.filter(s => s.include && s.state !== 'Missing').length, async () => {
     const sb = await sendEdit(`/api/batches/${b.id}/run`, {});
     if (sb) { upsert(sb); b.tab = 'run'; render(); }
-  });
+  }));
 }
 const cancel = (b, path) => sendEdit(`/api/batches/${b.id}/cancel`, { path });
 const cancelAll = b => sendEdit(`/api/batches/${b.id}/cancel-all`, {});
 // The server decides: during a run it moves a Queued script in the queue, otherwise it changes the start order. dir: up, down, top, bottom.
 const move = (b, path, dir) => path && sendEdit(`/api/batches/${b.id}/move`, { path, to: dir });
 const moveBatch = (b, dir) => sendEdit(`/api/batches/${b.id}/move-in-list`, { to: dir });
-// A rerun after the run ended checks the logon first, as Run does. A rerun during the run uses the kept password.
-const afterLogon = (b, go) => b.run?.ended ? logon(b, go) : go();
-const rerun = (b, path) => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun`, { path }));
-const rerunFailed = b => afterLogon(b, () => sendEdit(`/api/batches/${b.id}/rerun-failed`, {}));
+// A rerun after the run ended checks the logon first, as Run does. A rerun during the run uses the kept password,
+// but "Confirm before run" also checks the logon then: the dialog shows the login.
+const afterLogon = (b, n, go) => b.run?.ended || b.settings.confirmBeforeRun ? logon(b, confirmed(b, n, go)) : go();
+const rerun = (b, path) => afterLogon(b, 1, () => sendEdit(`/api/batches/${b.id}/rerun`, { path }));
+const rerunFailed = b => afterLogon(b, Object.values(b.run.rs).filter(r => r.status === 'Failed' || r.status === 'Cancelled').length,
+  () => sendEdit(`/api/batches/${b.id}/rerun-failed`, {}));
 function setInclude(b, s, include) { s.include = include; render(); sendEdit(`/api/batches/${b.id}/include`, { path: s.path, include }); }
 // The folder, Open and Save as dialogs: the server lists the folders (and the batch files). kind: folder, open or saveAs.
 async function browse(b, path, kind = 'folder') {

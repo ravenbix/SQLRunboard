@@ -1,7 +1,9 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Net.ServerSentEvents;
 using System.Text;
 using System.Text.Json;
+using SqlRunboard.Core;
 using SqlRunboard.Gui;
 
 public class AppSettingsTests
@@ -45,6 +47,22 @@ public class AppSettingsTests
         var settings = await SnapshotApp(http2);
         Assert.Equal("table", settings.GetProperty("view").GetString());
         Assert.Equal("Dark", settings.GetProperty("theme").GetString()); // a POST changes only the names it sends
+    }
+
+    [Fact]
+    public async Task A_settings_file_that_cannot_be_written_does_not_fail_Open()
+    {
+        await using var app = await TestApp.StartAsync();
+        var folder = Directory.CreateTempSubdirectory("sqlrunboard-open-").FullName;
+        var file = Path.Combine(folder, "x.sqlrunboard.json");
+        File.WriteAllText(file, BatchFile.Format(new BatchSettings(), []));
+        Directory.CreateDirectory(Path.Combine(app.AppData, AppSettings.FileName)); // a folder in its place: each write fails
+        using var http = app.Client();
+
+        var res = await http.PostAsJsonAsync("/api/batches/open", new { path = file }, Ct);
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode); // the side list has the batch
+        Directory.Delete(folder, recursive: true);
     }
 
     [Theory]

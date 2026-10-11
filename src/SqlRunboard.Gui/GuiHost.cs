@@ -67,7 +67,7 @@ public sealed class GuiHost : IAsyncDisposable
         builder.Services.ConfigureHttpJsonOptions(j => j.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
         var app = builder.Build();
-        RestoreBatches(app.Services.GetRequiredService<BatchList>(), app.Services.GetRequiredService<AppSettings>());
+        RestoreBatches(app.Services.GetRequiredService<BatchList>(), app.Services.GetRequiredService<AppSettings>(), app.Logger);
         app.Use(RejectForeignRequests);
         app.Use(RequireToken(token));
         var files = new EmbeddedFileProvider(typeof(GuiHost).Assembly, "SqlRunboard.Gui.wwwroot");
@@ -145,13 +145,20 @@ public sealed class GuiHost : IAsyncDisposable
         return host;
     }
 
-    /// <summary>The side list comes back from the app settings, and each change of its batch files goes there.</summary>
-    static void RestoreBatches(BatchList list, AppSettings settings)
+    /// <summary>
+    /// The side list comes back from the app settings, and each change of its batch files goes there.
+    /// A write error does not fail the batch command that changed the list: the next change of the list writes it again.
+    /// </summary>
+    static void RestoreBatches(BatchList list, AppSettings settings, ILogger log)
     {
         const string Name = "batchFiles";
         var files = settings.Snapshot()[Name] as JsonArray ?? [];
         list.Restore(files.Where(f => f?.GetValueKind() == JsonValueKind.String).Select(f => f!.GetValue<string>()));
-        list.FilesChanged = f => settings.Merge(new JsonObject { [Name] = new JsonArray([.. f.Select(x => (JsonNode)x)]) });
+        list.FilesChanged = f =>
+        {
+            try { settings.Merge(new JsonObject { [Name] = new JsonArray([.. f.Select(x => (JsonNode)x)]) }); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { log.LogWarning("Cannot write {File}: {Error}", AppSettings.FileName, e.Message); }
+        };
     }
 
     /// <summary>A batch file command: the batch, or a problem whose detail the page shows. 409: the file changed on disk.</summary>
@@ -274,7 +281,9 @@ public sealed class AppSettings(GuiHostOptions options)
         {
             var v = Load();
             foreach (var (name, value) in changes) v[name] = value?.DeepClone();
-            File.WriteAllText(path, v.ToJsonString());
+            // A temporary file and a rename: a crash during the write cannot leave half a file.
+            File.WriteAllText(path + ".tmp", v.ToJsonString());
+            File.Move(path + ".tmp", path, overwrite: true);
         }
     }
 

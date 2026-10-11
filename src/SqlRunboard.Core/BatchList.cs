@@ -245,7 +245,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         var ended = scripts.Count > 0 && (server != (target.Server ?? "") || database != (target.Database ?? ""));
         if (!ended)
         {
-            var run = runs[b.Id] = new ActiveRun(start, FolderPath(b.File, b.Settings.Folder) ?? "", b.Settings, RunLog.Open(folder, time, text => Warn(b.Id, text)));
+            var run = runs[b.Id] = shown[b.Id] = new ActiveRun(start, FolderPath(b.File, b.Settings.Folder) ?? "", b.Settings, RunLog.Open(folder, time, text => Warn(b.Id, text)));
             foreach (var s in scripts) run.Scripts[s.Path] = s;
         }
         return b with { Run = new RunState(start, time.GetUtcNow(), scripts, [], ended) };

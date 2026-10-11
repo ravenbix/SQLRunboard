@@ -157,6 +157,24 @@ public sealed class RestoreTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_rerun_after_a_restart_publishes_its_messages()
+    {
+        await InterruptedRun();
+        executor.Scripts.Clear();
+        executor.Scripts["2.sql"] = new FakeScript { Messages = [new(SqlMessageKind.Info, "again")] };
+
+        var again = Restart();
+        using var sub2 = again.Subscribe();
+        again.Rerun(sub2.Snapshot[0].Id, "2.sql");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Change c;
+        do c = await sub2.Changes.ReadAsync(cts.Token);
+        while (c.Kind != "message");
+        Assert.Equal(("2.sql", 2, "again"), (((ScriptMessage)c.Data).Path, ((ScriptMessage)c.Data).Attempt, ((ScriptMessage)c.Data).Text));
+    }
+
+    [Fact]
     public async Task A_target_change_while_the_app_was_stopped_ends_the_run()
     {
         var a = await InterruptedRun(new BatchTarget { Server = "sql01", Database = "Sales" });

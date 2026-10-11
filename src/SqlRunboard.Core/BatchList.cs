@@ -21,6 +21,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     readonly Dictionary<int, string> passwords = []; // in memory only: never in a Batch, a file or an event
     readonly Dictionary<int, string> loaded = []; // batch id -> the file text that the app last read or wrote
     readonly HashSet<Task> finishing = []; // one per Running script: ends after Finish wrote its state and log
+    List<Change>? held; // while Pump starts executors: their first messages, to publish after the run state
     int lastId, lastUntitled;
     string[] files = [];
 
@@ -421,10 +422,11 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
     }
 
     // Call under the lock. Starts Queued scripts up to the parallel limit, then publishes the run.
-    // The executors start after the publish, so the page sees an attempt before its first message.
+    // The executors start before the publish, so a Running script that a subscriber sees has started.
+    // Their messages wait until after the publish, so the page sees an attempt before its first message.
     void Pump(int id, ActiveRun run)
     {
-        List<Action> after = [];
+        List<Action> starts = [];
         while (run.Running < run.Settings.ParallelLimit && run.Queue.Count > 0)
         {
             var path = run.Queue[0];
@@ -440,7 +442,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
                 run.Add(path, new Attempt(start, start, ScriptStatus.Failed, null, error));
                 run.Log?.Append($"{Attempt(run, path)}: Failed: {error}");
                 var n = run.Scripts[path].Attempts.Count;
-                after.Add(() => AddMessage(id, run, path, n, new(SqlMessageKind.Error, error)));
+                starts.Add(() => AddMessage(id, run, path, n, new(SqlMessageKind.Error, error)));
                 run.Failed();
                 continue;
             }
@@ -456,7 +458,7 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
                 run.Log?.Append($"{attempt}: {(m.Kind == SqlMessageKind.Error ? "Error: " : "")}{m.Text}"); // outside the lock: a file write
                 lock (gate) AddMessage(id, run, path, number, m);
             }
-            after.Add(() =>
+            starts.Add(() =>
             {
                 Task? done = null;
                 // The continuation takes the lock, so it cannot remove 'done' before this method adds it.
@@ -465,11 +467,16 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
                 finishing.Add(done);
             });
         }
+        var outer = held;
+        held = [];
+        foreach (var a in starts) a();
+        var messages = held;
+        held = outer;
         run.Log?.Update(run.Scripts.Values, run.Settings.Target); // also for a run that is no longer current: its late ends go to its log
         var i = batches.FindIndex(b => b.Id == id);
         if (i >= 0 && runs.GetValueOrDefault(id) == run)
             Publish(new Change("batch", batches[i] = batches[i] with { Run = new RunState(run.Start, time.GetUtcNow(), [.. run.Scripts.Values], [.. run.Queue]) }));
-        foreach (var a in after) a();
+        foreach (var m in messages) Publish(m);
     }
 
     // Call under the lock. Keeps the last MaxMessages of the attempt, and sends the message to the page if the batch shows this run.
@@ -480,7 +487,9 @@ public sealed class BatchList(ISqlExecutor executor, TimeProvider time, string? 
         kept.Enqueue(message);
         if (kept.Count > MaxMessages) { kept.Dequeue(); earlier++; }
         run.Messages[(path, attempt)] = (kept, earlier);
-        if (shown.GetValueOrDefault(id) == run) Publish(new Change("message", new ScriptMessage(id, path, attempt, message.Time, m.Kind, m.Text)));
+        if (shown.GetValueOrDefault(id) != run) return;
+        var change = new Change("message", new ScriptMessage(id, path, attempt, message.Time, m.Kind, m.Text));
+        if (held is not null) held.Add(change); else Publish(change);
     }
 
     void Finish(int id, ActiveRun run, string path, DateTimeOffset start, Task<SqlResult> t)

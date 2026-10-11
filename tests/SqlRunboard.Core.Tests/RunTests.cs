@@ -77,6 +77,7 @@ public sealed class RunTests : IAsyncDisposable
         {
             var run = await Until(b.Id, r => r.Scripts.Count(s => s.Status == ScriptStatus.Running) == 1 && r.Scripts.Count(s => s.Status == ScriptStatus.Succeeded) == n);
             Assert.Equal(1, run.Scripts.Count(s => s.Status == ScriptStatus.Running));
+            Assert.Equal(n + 1, executor.Calls.Count); // a published Running script has started: its 5 s wait is on the clock
             time.Advance(TimeSpan.FromSeconds(5));
         }
 

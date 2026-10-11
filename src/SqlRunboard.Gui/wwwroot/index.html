@@ -2,7 +2,6 @@
 <!--
   The SQLRunboard page, ported from docs/prototype-gui.html. The server keeps all state:
   the page gets it from the SSE stream (/events) and sends each command as a JSON POST.
-  Commands that later tickets build call todo().
 -->
 <html lang="en">
 <head>
@@ -125,18 +124,6 @@ td.num, th.num { text-align: right; }
 .msgs .Error { color: var(--red); }
 .msgs .RowCount { color: var(--muted); }
 
-.src { margin: 0; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow: auto; tab-size: 4; }
-.src div { padding-right: 12px; }
-.src .ln { display: inline-block; width: 4ch; margin-right: 12px; text-align: right; color: var(--muted); user-select: none; }
-.src .go { color: var(--sel); font-weight: 600; }
-.src .cm { color: var(--muted); }
-.src .hl { background: color-mix(in srgb, var(--red) 18%, transparent); }
-.files { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
-.preview { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.preview h3 { margin: 0; padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
-.preview .src { max-height: 60vh; padding: 6px 0; }
-#drawer .src { flex: 1; padding: 8px 0; }
-a[data-line] { color: inherit; text-decoration: underline; }
 .form { display: grid; grid-template-columns: 190px minmax(0, 360px); gap: 8px 12px; align-items: center; }
 .form h3 { grid-column: 1 / -1; margin: 12px 0 0; font-size: 13px; }
 .form .hint { grid-column: 2; font-size: 12px; color: var(--muted); margin-top: -4px; }
@@ -165,7 +152,7 @@ a[data-line] { color: inherit; text-decoration: underline; }
   #drawer-resize { display: none; }
   #drawer { width: auto !important; border-left: 0; border-top: 1px solid var(--line); max-height: 45vh; }
   .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .form, .files { grid-template-columns: 1fr; } .form .hint { grid-column: 1; }
+  .form { grid-template-columns: 1fr; } .form .hint { grid-column: 1; }
   #panel { overflow-x: auto; }
 }
 </style>
@@ -219,7 +206,7 @@ function toRun(r) {
   const t0 = Date.parse(r.start), sec = x => x == null ? null : (Date.parse(x) - t0) / 1000, skew = Date.parse(r.now) - Date.now(), rs = {};
   for (const s of r.scripts) rs[s.path] = { status: s.status, error: s.error, attempts: s.attempts.map((a, i) => ({ n: i + 1, start: sec(a.start), end: sec(a.end), status: a.status, rows: a.rows, error: a.error })) };
   const ended = !r.scripts.some(s => s.status === 'Queued' || s.status === 'Running');
-  return { rs, queue: r.queue, wall: new Date(t0), live: true, ended, stale: r.ended, endAt: ended ? Math.max(0, ...Object.values(rs).flatMap(x => x.attempts.map(a => a.end ?? 0))) : null, get t() { return (Date.now() + skew - t0) / 1000; } };
+  return { rs, queue: r.queue, wall: new Date(t0), ended, stale: r.ended, endAt: ended ? Math.max(0, ...Object.values(rs).flatMap(x => x.attempts.map(a => a.end ?? 0))) : null, get t() { return (Date.now() + skew - t0) / 1000; } };
 }
 const fromView = s => ({ folder: s.folder || null, filters: s.filters, recurse: s.recurse, parallelLimit: +s.parallelLimit, stopOnFirstFailure: s.stopOnFirstFailure, confirmBeforeRun: s.confirmBeforeRun,
   timeoutSeconds: s.timeoutSeconds === '' ? null : +s.timeoutSeconds,
@@ -282,11 +269,9 @@ const DONE = ['Succeeded', 'Failed', 'Cancelled'];
 const lastA = r => r.attempts[r.attempts.length - 1];
 const firstStart = r => Math.min(...r.attempts.filter(a => a.start != null).map(a => a.start));
 const canMove = (b, path) => b.run ? !b.run.ended && b.run.rs[path]?.status === 'Queued' : !locked(b) && !!b.scripts.find(x => x.path === path);
-const locked = b => !!b.signing || !!(b.run && b.run.live && !b.run.ended);
+const locked = b => !!b.signing || !!(b.run && !b.run.ended);
 const canRerun = (b, r) => DONE.includes(r.status) && !b.signing && !b.run.stale; // stale: the settings changed, so the run ended
 
-// ponytail: stand-ins for the commands of later tickets. Each ticket replaces its names with a POST.
-const todo = () => toast('Not available yet.');
 // Edits go to the server one at a time, in the order you make them. queued() gives the error to the caller; sendEdit() shows it.
 let edits = Promise.resolve();
 function queued(url, body) { const p = edits.then(() => post(url, body)); edits = p.catch(() => null); return p; }
@@ -377,12 +362,6 @@ function dropBatch(id) {
   if (app.cur === id) app.cur = (app.batches[i] ?? app.batches[i - 1])?.id ?? null;
   render();
 }
-const scriptText = () => null; // the file text comes with the Files tab
-function renderSource(lines, hl) {
-  if (!lines) return '<p class="muted" style="padding:0 12px">The file is not on disk.</p>';
-  return `<div class="src" data-scroll="src" tabindex="0" aria-label="File content">${lines.map((t, i) => `<div id="L-${i + 1}" class="${i + 1 === hl ? 'hl' : ''}"><span class="ln">${i + 1}</span><span class="${/^\s*go\s*$/i.test(t) ? 'go' : /^\s*--/.test(t) ? 'cm' : ''}">${esc(t) || ' '}</span></div>`).join('')}</div>`;
-}
-const lineLink = text => esc(text).replace(/^line (\d+)/, (m, n) => `<a href="#" data-line="${n}">${m}</a>`);
 
 // ---------- view helpers ----------
 const ICON = { NotRun: '○', Queued: '○', Running: '▶', Succeeded: '✓', Failed: '✕', Cancelled: '✕' };
@@ -390,11 +369,9 @@ const CVAR = { NotRun: '--grey', Queued: '--grey', Running: '--yellow', Succeede
 const esc = x => String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const dur = sec => { sec = Math.max(0, Math.floor(sec)); const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60, p = n => String(n).padStart(2, '0'); return h ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`; };
 const words = sec => { sec = Math.floor(sec); const m = Math.floor(sec / 60), s = sec % 60; return [m && `${m} minute${m > 1 ? 's' : ''}`, `${s} second${s !== 1 ? 's' : ''}`].filter(Boolean).join(' '); };
-const p2 = n => String(n).padStart(2, '0');
-const stamp = d => `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
 const clock = (run, sec) => new Date(run.wall.getTime() + sec * 1000).toLocaleTimeString([], { hour12: false });
 const bubble = st => `<span class="st s-${st}" aria-hidden="true">${ICON[st]}</span>`;
-const aEnd = (run, a) => a.end ?? (a.status === 'Running' ? run.t : a.barEnd ?? null);
+const aEnd = (run, a) => a.end ?? (a.status === 'Running' ? run.t : null);
 const elapsedOf = (b, r) => { const a = r && lastA(r); if (!a || a.start == null) return null; const e = aEnd(b.run, a); return e == null ? null : e - a.start; };
 const rowsOf = r => { const a = r && lastA(r); return a?.rows ?? null; };
 function counts(b) {
@@ -427,7 +404,7 @@ function runOrder(b) { // start of the first attempt; Queued at the bottom in qu
   return [...started, ...queued, ...rows.filter(x => !started.includes(x) && !queued.includes(x))];
 }
 function boardCols(b) {
-  const rows = rowsFor(b), endKey = x => { const a = lastA(x.r); return a ? a.end ?? a.cancelAt ?? a.barEnd ?? 0 : 0; };
+  const rows = rowsFor(b), endKey = x => { const a = lastA(x.r); return a?.end ?? 0; };
   return [
     ['Queued', rows.filter(x => x.r.status === 'Queued').sort((x, y) => x.q - y.q)],
     ['Running', rows.filter(x => x.r.status === 'Running').sort((x, y) => lastA(x.r).start - lastA(y.r).start)],
@@ -484,7 +461,6 @@ function renderRun(b) {
   let head = `<div class="toolbar"><div class="seg" role="group" aria-label="View">${['board', 'table', 'timeline'].map(v => `<button data-view="${v}" aria-pressed="${app.view === v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>`;
   if (app.view === 'timeline') head += `<label><input type="checkbox" data-tl="tlColumns" ${app.tlColumns ? 'checked' : ''}> Columns</label><label><input type="checkbox" data-tl="tlCollapse" ${app.tlCollapse ? 'checked' : ''}> Collapse idle gaps</label>`;
   head += '</div>';
-  if (run?.restored && !run.live) head += `<p class="note">Last run, from <span class="tnum">logs/${esc(b.name)}_${stamp(run.wall)}/summary.csv</span>.${run.unfinished ? ` Interrupted: the app stopped at or after ${clock(run, run.newest)}.` : ''} Rerun opens this run again. Run starts a new run.</p>`;
   if (run?.stale) head += '<p class="note">The settings changed. Run the batch again.</p>';
   if (!run) head += '<p class="note">No run yet. These scripts are Queued in the start order. Move them here or in the Files tab.</p>';
   return head + (app.view === 'board' ? renderBoard(b) : app.view === 'table' ? renderTable(b) : renderTimeline(b));
@@ -495,7 +471,6 @@ function cardMeta(b, x) {
   if (e != null) parts.push(dur(e));
   parts.push(`attempt ${x.r.attempts.length}`, `${rows == null ? '—' : rows.toLocaleString()} rows`);
   if (x.r.status === 'Cancelled') parts.push('<b>Cancelled</b>');
-  if (x.r.status === 'Running' && lastA(x.r).rollback != null) parts.push('<b>Rolling back</b>');
   return parts.map(p => `<span>${p}</span>`).join('');
 }
 function renderBoard(b) {
@@ -544,8 +519,8 @@ function renderTimeline(b) {
   const breaks = sc.gaps.map(g => `<div class="brk" style="left:${sc.f(g.s) * 100}%;width:${sc.G * 100}%"></div>`).join('');
   const breakLabels = sc.gaps.map(g => `<div class="brkl" style="left:${(sc.f(g.s) + sc.G / 2) * 100}%">⋯ ${dur(g.e - g.s)} idle</div>`).join('');
   const bars = x => x.r.attempts.filter(a => a.start != null).map(a => {
-    const e = aEnd(run, a) ?? a.start, l = sc.f(a.start), w = sc.f(e) - l, d = dur(e - a.start), st = a.status, icon = a.error?.startsWith('Interrupted') ? '✕' : ICON[st];
-    const tip = `Attempt ${a.n} ${st}\nStart ${clock(run, a.start)}\nEnd ${a.end != null ? clock(run, a.end) : st === 'Running' ? '(running)' : '(interrupted)'}\nDuration ${d}`;
+    const e = aEnd(run, a) ?? a.start, l = sc.f(a.start), w = sc.f(e) - l, d = dur(e - a.start), st = a.status, icon = ICON[st];
+    const tip = `Attempt ${a.n} ${st}\nStart ${clock(run, a.start)}\nEnd ${a.end != null ? clock(run, a.end) : '(running)'}\nDuration ${d}`;
     return `<div class="bar ${st === 'Cancelled' ? 'hatch' : ''}" style="left:${l * 100}%;width:${w * 100}%;background:var(${CVAR[st]})" data-path="${esc(x.path)}" data-att="${a.n}" title="${esc(tip)}"
       role="img" aria-label="${esc(`${x.path}, attempt ${a.n}, ${st}, started ${clock(run, a.start)}, duration ${words(e - a.start)}`)}"><span class="d">${d} </span><span class="i">${icon}</span></div>`;
   }).join('');
@@ -566,13 +541,13 @@ function renderFiles(b) {
     <div class="toolbar"><span class="muted">Folder <span class="tnum">${esc(b.settings.folder)}</span> · Filters <span class="tnum">${esc(b.settings.filters)}</span></span>
       ${['top', 'up', 'down', 'bottom'].map(d => `<button data-fmove="${d}" ${lk || !sel ? 'disabled' : ''}>${{ top: 'Move to top', up: 'Move up', down: 'Move down', bottom: 'Move to bottom' }[d]}</button>`).join('')}
       <button data-cmd="sortFiles" ${lk ? 'disabled' : ''}>Sort by file name</button></div>
-    <div class="files"><table><thead><tr><th>Run</th><th class="num">#</th><th>File</th><th>State</th></tr></thead><tbody>
+    <table><thead><tr><th>Run</th><th class="num">#</th><th>File</th><th>State</th></tr></thead><tbody>
     ${b.scripts.map((s, i) => `<tr data-file="${esc(s.path)}" data-k="f:${esc(s.path)}" tabindex="${sel === s.path ? 0 : -1}" class="${sel === s.path ? 'issel' : ''}">
       <td><input type="checkbox" data-include="${esc(s.path)}" aria-label="Include ${esc(s.path)}" ${s.include ? 'checked' : ''} ${lk || s.state === 'Missing' ? 'disabled' : ''}></td>
       <td class="num">${i + 1}</td><td class="tnum">${esc(s.path)}</td>
       <td>${s.state === 'New' ? '<span class="badge new">New</span>' : s.state === 'Missing' ? '<span class="badge miss">⚠ Missing on disk. The next save removes it.</span>' : ''}${s.include ? '' : ' <span class="muted">skipped</span>'}</td></tr>`).join('')}
     </tbody></table>
-    <section class="preview" aria-label="File content">${sel ? `<h3 class="tnum">${esc(sel)}</h3>${renderSource(scriptText(b, sel))}` : '<p class="muted" style="padding:0 12px">Select a file to see its content.</p>'}</section></div>`;
+`;
 }
 function renderSettings(b) {
   const s = b.settings, lk = locked(b), dis = lk ? 'disabled' : '';
@@ -603,7 +578,7 @@ function renderDrawer(b) {
   if (!b || !b.drawer || !b.sel) return '';
   const x = rowsFor(b).find(y => y.path === b.sel);
   if (!x) return '';
-  const r = x.r, a = lastA(r), live = b.run && !b.run.ended, mv = canMove(b, x.path);
+  const r = x.r, live = b.run && !b.run.ended, mv = canMove(b, x.path);
   let body = b.warnings.map(w => `<div class="Error">${esc(w)}</div>`).join(''); // log write warnings of the run
   if (r.virtual) body = '<p class="muted">No run yet.</p>';
   else if (!r.attempts.length && r.error) body = `<div class="Error">${esc(r.error)}</div>`; // did not start
@@ -611,20 +586,19 @@ function renderDrawer(b) {
     body += `<div class="sep" id="att-${at.n}">Attempt ${at.n}${at.start != null ? ` · ${clock(b.run, at.start)}` : ''} · ${at.status}</div>`;
     const ms = b.msgs[x.path]?.[at.n];
     if (ms?.earlier) body += `<div class="muted">${ms.earlier.toLocaleString()} earlier messages are in run.log</div>`;
-    body += (ms?.list ?? []).map(m => `<div class="${m.kind}"><span class="muted tnum">${new Date(m.time).toLocaleTimeString([], { hour12: false })}</span> ${m.kind === 'Error' ? lineLink(m.text) : esc(m.text)}</div>`).join('');
+    body += (ms?.list ?? []).map(m => `<div class="${m.kind}"><span class="muted tnum">${new Date(m.time).toLocaleTimeString([], { hour12: false })}</span> ${esc(m.text)}</div>`).join('');
     if (!ms && at.error) body += `<div class="Error">${esc(at.error)}</div>`; // a run from summary.csv after a restart has no messages
   }
   return `<div class="dh"><div class="t">${bubble(r.status)}<span>${esc(x.path)}</span></div>
-    <button data-cmd="dCancel" ${live && (r.status === 'Queued' || (r.status === 'Running' && a.rollback == null)) ? '' : 'disabled'}>Cancel</button>
+    <button data-cmd="dCancel" ${live && (r.status === 'Queued' || r.status === 'Running') ? '' : 'disabled'}>Cancel</button>
     <button data-cmd="dRerun" ${canRerun(b, r) ? '' : 'disabled'}>Rerun</button>
     ${['top', 'up', 'down', 'bottom'].map(d => `<button data-dmove="${d}" aria-label="${{ top: 'Move to top', up: 'Move up', down: 'Move down', bottom: 'Move to bottom' }[d]}" title="${{ top: 'Move to top (Alt+Home)', up: 'Move up (Alt+↑)', down: 'Move down (Alt+↓)', bottom: 'Move to bottom (Alt+End)' }[d]}" ${mv ? '' : 'disabled'}>${{ top: '⤒', up: '↑', down: '↓', bottom: '⤓' }[d]}</button>`).join('')}
     <button data-cmd="closeDrawer" aria-label="Close drawer" title="Esc">✕</button>
-    <div class="seg" role="group" aria-label="Drawer view" style="flex-basis:100%"><button data-dview="messages" aria-pressed="${b.dview !== 'script'}">Messages</button><button data-dview="script" aria-pressed="${b.dview === 'script'}">Script</button></div></div>
-    ${b.dview === 'script' ? renderSource(scriptText(b, x.path), b.hlLine) : `<div class="msgs" data-scroll="msgs">${body}</div>`}
+    <div class="msgs" data-scroll="msgs">${body}</div>
     <p class="muted" style="font-size:11px;margin:0;padding:6px 12px;border-top:1px solid var(--line)">PRINT output can arrive late. For live progress, use RAISERROR('text', 0, 1) WITH NOWAIT.</p>`;
 }
 let lastLock = null;
-const FOCUS_ATTRS = ['data-dview', 'data-k', 'data-cmd', 'data-tab', 'data-view', 'data-sort', 'data-tl', 'data-dmove', 'data-fmove', 'data-include', 'data-set'];
+const FOCUS_ATTRS = ['data-k', 'data-cmd', 'data-tab', 'data-view', 'data-sort', 'data-tl', 'data-dmove', 'data-fmove', 'data-include', 'data-set'];
 function focusSel(el) {
   const scope = el?.closest?.('#side, #hdr, #tabs, #panel, #drawer, .topbar'); if (!scope) return null;
   const a = FOCUS_ATTRS.find(x => el.hasAttribute(x)); if (!a) return null;
@@ -656,10 +630,7 @@ function render(o = {}) {
     if (!panelEl.querySelector('[data-k][tabindex="0"]')) panelEl.querySelector('[data-k^="s:"], [data-k^="f:"]')?.setAttribute('tabindex', '0'); // roving tab stop
   }
   lastLock = lk;
-  const srcTop = drawerEl.querySelector('.src')?.scrollTop;
   if (rebuild || liveView) { const dh = renderDrawer(b); drawerEl.hidden = !dh; drawerEl.innerHTML = dh; document.getElementById('drawer-resize').hidden = !dh; }
-  const src = drawerEl.querySelector('.src');
-  if (src) { if (b.scrollLine) { src.querySelector('#L-' + b.scrollLine)?.scrollIntoView({ block: 'center' }); b.scrollLine = null; } else if (srcTop != null) src.scrollTop = srcTop; }
   const m = rebuild || liveView ? drawerEl.querySelector('.msgs') : null;
   if (m) {
     if (b.scrollAttempt) { m.querySelector('#att-' + b.scrollAttempt)?.scrollIntoView({ block: 'start' }); b.scrollAttempt = null; }
@@ -734,7 +705,7 @@ function openMenu(b, path, x, y) {
   const el = document.getElementById('menu');
   el.innerHTML = `<div class="m" role="menu" aria-label="${esc(path)}" style="left:${Math.min(x, innerWidth - 230)}px;top:${Math.min(y, innerHeight - 260)}px">
     ${it('open', 'Show messages', 'Enter', true)}
-    ${it('cancel', 'Cancel', '', live && (r.status === 'Queued' || (r.status === 'Running' && lastA(r).rollback == null)))}
+    ${it('cancel', 'Cancel', '', live && (r.status === 'Queued' || r.status === 'Running'))}
     ${it('rerun', 'Rerun', '', canRerun(b, r))}<hr>
     ${it('top', 'Move to top', 'Alt+Home', mv)}${it('up', 'Move up', 'Alt+↑', mv)}${it('down', 'Move down', 'Alt+↓', mv)}${it('bottom', 'Move to bottom', 'Alt+End', mv)}</div>`;
   el.querySelector('button:not(:disabled)')?.focus();
@@ -788,7 +759,6 @@ function cmd(c, el) {
     case 'dCancel': cancel(b, b.sel); return render();
     case 'dRerun': rerun(b, b.sel); return render();
     case 'closeDrawer': b.drawer = false; render(); return document.querySelector(`[data-k="s:${CSS.escape(b.sel)}"]`)?.focus();
-    case 'runlog': return todo();
     case 'test': return logon(b, r => { b.testMsg = `Connected. Server ${r.server}, database ${r.database}, login ${r.login}.`; });
     case 'browse': return pickFolder(b);
     case 'sortFiles': return sendEdit(`/api/batches/${b.id}/sort`, {});
@@ -816,8 +786,6 @@ document.addEventListener('click', e => {
   const tab = t.closest('[data-tab]'); if (tab) { b.tab = tab.dataset.tab; return render(); }
   const v = t.closest('[data-view]'); if (v) { app.view = v.dataset.view; store.set('view', app.view); return render(); }
   const so = t.closest('[data-sort]'); if (so) { const k = so.dataset.sort; b.sort = b.sort?.key === k ? (b.sort.dir > 0 ? { key: k, dir: -1 } : null) : { key: k, dir: 1 }; return render(); }
-  const dv = t.closest('[data-dview]'); if (dv) { b.dview = dv.dataset.dview; b.hlLine = null; return render(); }
-  const ln = t.closest('[data-line]'); if (ln) { e.preventDefault(); b.dview = 'script'; b.hlLine = b.scrollLine = +ln.dataset.line; return render(); }
   const dm = t.closest('[data-dmove]'); if (dm) { move(b, b.sel, dm.dataset.dmove); return render(); }
   const fm = t.closest('[data-fmove]'); if (fm) return move(b, b.fileSel, fm.dataset.fmove);
   if (t.matches('[data-include]')) return;

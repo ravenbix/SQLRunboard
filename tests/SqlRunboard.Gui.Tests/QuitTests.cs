@@ -120,4 +120,10 @@ public class QuitPageTests : AppPageTest
         var csv = Directory.GetFiles(Path.Combine(root, "logs"), "summary.csv", SearchOption.AllDirectories).Single();
         Assert.Contains("a.sql,1,Cancelled", File.ReadAllText(csv));
     }
+
+    public override async ValueTask DisposeAsync()
+    {
+        await base.DisposeAsync();
+        Directory.Delete(root, recursive: true);
+    }
 }

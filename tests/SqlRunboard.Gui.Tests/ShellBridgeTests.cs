@@ -60,6 +60,65 @@ public class ShellBridgeTests : AppPageTest
         await Expect(Panel.GetByLabel("Folder", new() { Exact = true })).ToHaveValueAsync("");
     }
 
+    [Fact]
+    public async Task Open_uses_the_native_file_dialog_and_opens_the_batch_file()
+    {
+        var b = App.Host.Batches.NewBatch();
+        var file = App.Host.Batches.Save(b.Id, Path.Combine(root, "deploy"), overwrite: false)!.File!;
+        App.Host.Batches.Remove(b.Id);
+
+        await Top("Open…").ClickAsync();
+        var req = await RequestAsync();
+        Assert.Equal("open", req.GetProperty("cmd").GetString());
+        await Expect(Dialog).ToHaveCountAsync(0);
+        await ReplyAsync(req, file);
+
+        await Expect(Page.Locator("#hdr h1")).ToHaveTextAsync("deploy");
+    }
+
+    [Fact]
+    public async Task Open_accepts_only_batch_files()
+    {
+        var other = Path.Combine(root, "notes.json");
+        File.WriteAllText(other, "{}");
+
+        await Top("Open…").ClickAsync();
+        await ReplyAsync(await RequestAsync(), other);
+
+        await Expect(Page.Locator("#toast")).ToContainTextAsync(".sqlrunboard.json");
+    }
+
+    [Fact]
+    public async Task Save_as_uses_the_native_file_dialog_and_saves_to_the_real_path()
+    {
+        await NewBatchAsync();
+
+        await Top("Save as…").ClickAsync();
+        var req = await RequestAsync();
+        Assert.Equal("saveAs", req.GetProperty("cmd").GetString());
+        Assert.Equal("Untitled 1.sqlrunboard.json", req.GetProperty("name").GetString());
+        await Expect(Dialog).ToHaveCountAsync(0);
+        await ReplyAsync(req, Path.Combine(root, "nightly.sqlrunboard.json"));
+
+        await Expect(Page.Locator("#hdr h1")).ToHaveTextAsync("nightly");
+        Assert.True(File.Exists(Path.Combine(root, "nightly.sqlrunboard.json")));
+    }
+
+    [Fact]
+    public async Task Quit_saves_a_never_saved_batch_with_the_native_dialog_then_tells_the_shell_to_close()
+    {
+        App.Host.Batches.NewBatch();
+        await OpenAsync(Page, App.Host.BaseUrl);
+
+        _ = Page.EvaluateAsync("() => { quit(); }"); // the shell calls quit() from the close event of the window
+        await Dialog.GetByRole(AriaRole.Button, new() { Name = "Save", Exact = true }).ClickAsync();
+        await ReplyAsync(await RequestAsync(), Path.Combine(root, "nightly.sqlrunboard.json"));
+
+        Assert.Equal("stopped", (await RequestAsync(1)).GetProperty("cmd").GetString());
+        await Expect(Dialog).ToContainTextAsync("SQLRunboard stopped");
+        Assert.True(File.Exists(Path.Combine(root, "nightly.sqlrunboard.json")));
+    }
+
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();

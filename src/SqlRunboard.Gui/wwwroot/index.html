@@ -335,8 +335,16 @@ function saveBatch(b, path = null, overwrite = false) { // Ctrl+S; an unsaved ba
     e => { if (e.status === 409) openDialog({ kind: 'changed', b, path }); else toast(e.message); return false; });
 }
 // resolve (optional) gets the result of the save, or null if you cancel the dialog.
-const saveAs = (b, resolve) => b && !b.missing && browse(b, b.file ?? (isAbs(b.settings.folder) ? b.settings.folder : null), 'saveAs', resolve);
-const openBatch = () => browse(cur(), cur()?.file ?? null, 'open');
+function saveAs(b, resolve) {
+  if (!b || b.missing) return;
+  const path = b.file ?? (isAbs(b.settings.folder) ? b.settings.folder : null);
+  if (!inShell()) return browse(b, path, 'saveAs', resolve);
+  shell('saveAs', { path, name: b.name + EXT }).then(p => { const saved = p ? saveBatch(b, p) : null; resolve?.(saved); }); // the native dialog asks before it overwrites
+}
+function openBatch() {
+  if (!inShell()) return browse(cur(), cur()?.file ?? null, 'open');
+  shell('open', { path: cur()?.file ?? null }).then(p => { if (!p) return; if (p.toLowerCase().endsWith(EXT)) openFile(p); else toast(`Open accepts only ${EXT} files.`); });
+}
 async function openFile(path) { // the server gives the existing entry if the file is already in the list
   try { const b = upsert(await post('/api/batches/open', { path })); app.cur = b.id; closeDialog(); } catch (e) { toast(e.message); }
 }
@@ -736,6 +744,7 @@ async function quit() {
   try { await post('/api/quit'); } catch (e) { toast(e.message); return false; }
   es.close(); delete document.documentElement.dataset.connected;
   openDialog({ kind: 'stopped' });
+  if (inShell()) shell('stopped'); // the shell closes the window, also when the server is in another process
   return true;
 }
 function selectScript(b, path, openDrawer) { b.sel = path; if (openDrawer) b.drawer = true; render(); }
